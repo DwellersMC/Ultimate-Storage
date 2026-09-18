@@ -1,11 +1,9 @@
 package com.flwolfy.ults.display;
 
 import com.flwolfy.ults.UltsRuntime;
-import com.flwolfy.ults.data.lang.UltsLangManager;
 import com.flwolfy.ults.data.state.UltsWithdrawalPlan;
 import com.flwolfy.ults.util.UltsTextBuilder;
 import eu.pb4.sgui.api.elements.GuiElementBuilder;
-import eu.pb4.sgui.api.gui.AnvilInputGui;
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.List;
@@ -15,7 +13,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 
-public final class UltsWithdrawSGUI extends AnvilInputGui {
+public final class UltsWithdrawSGUI extends UltsAnvilInputGui {
 
   private static final List<WeakReference<UltsWithdrawSGUI>> OPEN_MENUS = new ArrayList<>();
   private final UltsRuntime runtime;
@@ -27,7 +25,7 @@ public final class UltsWithdrawSGUI extends AnvilInputGui {
     super(player, false);
     this.runtime = runtime;
     this.template = template.copyWithCount(1);
-    setTitle(text("ults.withdraw.title"));
+    setTitle(UltsGuiText.text("ults.withdraw.title"));
     setLockPlayerInventory(true);
     setDefaultInputValue("1");
     synchronized (OPEN_MENUS) {
@@ -47,7 +45,7 @@ public final class UltsWithdrawSGUI extends AnvilInputGui {
         if (gui == null || !gui.isOpen()) {
           return true;
         }
-        if (gui.runtime == runtime && gui.renderedRevision != runtime.state().revision()) {
+        if (gui.runtime == runtime && gui.renderedRevision != runtime.contentRevision()) {
           gui.render();
         }
         return false;
@@ -61,34 +59,42 @@ public final class UltsWithdrawSGUI extends AnvilInputGui {
   }
 
   private void render() {
-    renderedRevision = runtime.state().revision();
+    renderedRevision = runtime.contentRevision();
     String input = getInput();
     Integer quantity = parse(input);
-    UltsWithdrawalPlan plan = runtime.state().withdrawalPlan(
+    UltsWithdrawalPlan plan = runtime.withdrawalPlan(
         template, quantity == null ? 0 : quantity, boxed);
     boolean inventorySpace = plan.available() && canFit(plan.outputs());
     boolean confirmable = plan.available() && inventorySpace;
 
-    int visible = (int) Math.max(1, Math.min(plan.itemAvailable(), template.getMaxStackSize()));
-    ItemStack display = template.copyWithCount(visible);
-    GuiElementBuilder selected = new GuiElementBuilder(display)
+    GuiElementBuilder selected = new GuiElementBuilder(template.copyWithCount(1))
+        .glow()
         .setName(Component.literal(input))
-        .addLoreLine(template.getHoverName().copy().withStyle(ChatFormatting.WHITE))
-        .addLoreLine(text("ults.withdraw.available", format(plan.itemAvailable())))
-        .addLoreLine(text("ults.withdraw.requested", quantity == null ? "-" : quantity));
+        .addLoreLine(template.getHoverName().copy().withStyle(UltsTextBuilder.HIGHLIGHT))
+        .addLoreLine(UltsGuiText.labelled(
+            "ults.withdraw.available", plan.itemAvailable(), plan.itemAvailable() < 1))
+        .addLoreLine(UltsGuiText.labelled(
+            "ults.withdraw.requested",
+            quantity == null ? "-" : UltsGuiText.format(quantity),
+            quantity == null));
     if (boxed) {
-      selected.addLoreLine(text(
-          "ults.withdraw.boxes_available", format(plan.boxAvailable())));
-      selected.addLoreLine(text(
-          "ults.withdraw.items_required", format(plan.itemRequired())));
+      selected
+          .addLoreLine(UltsGuiText.labelled(
+              "ults.withdraw.boxes_available", plan.boxAvailable(), plan.boxAvailable() < 1))
+          .addLoreLine(UltsGuiText.labelled(
+              "ults.withdraw.items_required",
+              plan.itemRequired(),
+              plan.itemRequired() > plan.itemAvailable()));
     }
     setSlot(0, selected.build());
 
-    setSlot(1, new GuiElementBuilder(
-        boxed ? new ItemStack(Items.SHULKER_BOX) : template)
-        .setName(text(boxed ? "ults.withdraw.mode.box" : "ults.withdraw.mode.item")
+    ItemStack availableBox = runtime.availableBox();
+    ItemStack boxIcon = availableBox.isEmpty() ? new ItemStack(Items.SHULKER_BOX) : availableBox;
+    setSlot(1, new GuiElementBuilder(boxed ? boxIcon : template.copyWithCount(1))
+        .setName(UltsGuiText.text(boxed ? "ults.withdraw.mode.box" : "ults.withdraw.mode.item")
             .copy().withStyle(ChatFormatting.YELLOW))
-        .addLoreLine(text("ults.withdraw.mode.toggle"))
+        .addLoreLine(UltsGuiText.text("ults.withdraw.mode.toggle").copy()
+            .withStyle(ChatFormatting.GRAY))
         .setCallback(() -> {
           boxed = !boxed;
           render();
@@ -96,26 +102,29 @@ public final class UltsWithdrawSGUI extends AnvilInputGui {
 
     GuiElementBuilder confirm = new GuiElementBuilder(
         confirmable ? Items.DYE.lime() : Items.BARRIER)
-        .setName(text(confirmable ? "ults.withdraw.confirm" : "ults.withdraw.unavailable")
+        .setName(UltsGuiText.text(confirmable ? "ults.withdraw.confirm" : "ults.withdraw.unavailable")
             .copy().withStyle(confirmable ? ChatFormatting.GREEN : ChatFormatting.RED));
     if (!confirmable) {
-      confirm.addLoreLine(problem(plan, quantity, inventorySpace));
+      confirm.addLoreLine(problem(plan, quantity, inventorySpace).copy()
+          .withStyle(ChatFormatting.RED));
     } else {
-      confirm.addLoreLine(text(boxed
-          ? "ults.withdraw.confirm.box" : "ults.withdraw.confirm.item", quantity));
+      confirm.addLoreLine(UltsGuiText.text(boxed
+          ? "ults.withdraw.confirm.box" : "ults.withdraw.confirm.item", quantity)
+          .copy().withStyle(ChatFormatting.GREEN));
       confirm.setCallback(() -> confirm(quantity));
     }
     setSlot(2, confirm.build());
+    syncActionSlots();
   }
 
   private void confirm(int quantity) {
     synchronized (runtime.state()) {
-      UltsWithdrawalPlan plan = runtime.state().withdrawalPlan(template, quantity, boxed);
+      UltsWithdrawalPlan plan = runtime.withdrawalPlan(template, quantity, boxed);
       if (!plan.available() || !canFit(plan.outputs())) {
         render();
         return;
       }
-      List<ItemStack> outputs = runtime.state().takePlanned(template, quantity, boxed);
+      List<ItemStack> outputs = runtime.takePlanned(template, quantity, boxed);
       if (outputs.isEmpty()) {
         render();
         return;
@@ -123,13 +132,19 @@ public final class UltsWithdrawSGUI extends AnvilInputGui {
       for (ItemStack output : outputs) {
         player.getInventory().add(output);
         if (!output.isEmpty()) {
-          runtime.state().deposit(output);
+          // Remote mode has no void pool, so anything that did not fit stays with the player.
+          if (runtime.remote()) {
+            player.drop(output, false);
+          } else {
+            runtime.state().deposit(output);
+          }
         }
       }
     }
-    player.sendSystemMessage(UltsTextBuilder.success(text(
-        boxed ? "ults.withdraw.success.box" : "ults.withdraw.success.item", quantity,
-        template.getHoverName().getString())));
+    player.sendSystemMessage(UltsTextBuilder.success(UltsTextBuilder.format(
+        UltsGuiText.text(boxed ? "ults.withdraw.success.box" : "ults.withdraw.success.item"),
+        UltsTextBuilder.TEXT, UltsTextBuilder.HIGHLIGHT,
+        quantity, template.getHoverName().getString())));
     close();
     UltsStorageSGUI.open(player, runtime);
   }
@@ -140,21 +155,23 @@ public final class UltsWithdrawSGUI extends AnvilInputGui {
       boolean inventorySpace
   ) {
     if (quantity == null || quantity < 1) {
-      return text("ults.withdraw.problem.invalid");
+      return UltsGuiText.text("ults.withdraw.problem.invalid");
     }
     if (!plan.available()) {
       return switch (plan.problem()) {
-        case "nested_box" -> text("ults.withdraw.problem.nested_box");
-        case "too_large" -> text("ults.withdraw.problem.too_large");
-        case "items" -> text(
-            "ults.withdraw.problem.items", format(plan.itemRequired()), format(plan.itemAvailable()));
-        case "boxes" -> text(
-            "ults.withdraw.problem.boxes", plan.boxRequired(), format(plan.boxAvailable()));
-        default -> text("ults.withdraw.problem.invalid");
+        case "nested_box" -> UltsGuiText.text("ults.withdraw.problem.nested_box");
+        case "too_large" -> UltsGuiText.text("ults.withdraw.problem.too_large");
+        case "items" -> UltsGuiText.text(
+            "ults.withdraw.problem.items", UltsGuiText.format(plan.itemRequired()),
+            UltsGuiText.format(plan.itemAvailable()));
+        case "boxes" -> UltsGuiText.text(
+            "ults.withdraw.problem.boxes", plan.boxRequired(),
+            UltsGuiText.format(plan.boxAvailable()));
+        default -> UltsGuiText.text("ults.withdraw.problem.invalid");
       };
     }
     return inventorySpace
-        ? Component.empty() : text("ults.withdraw.problem.inventory");
+        ? Component.empty() : UltsGuiText.text("ults.withdraw.problem.inventory");
   }
 
   private boolean canFit(List<ItemStack> outputs) {
@@ -198,13 +215,5 @@ public final class UltsWithdrawSGUI extends AnvilInputGui {
     } catch (NumberFormatException ignored) {
       return null;
     }
-  }
-
-  private static String format(long amount) {
-    return String.format(java.util.Locale.ROOT, "%,d", amount);
-  }
-
-  private static Component text(String key, Object... arguments) {
-    return UltsLangManager.getInstance().text(key, arguments);
   }
 }

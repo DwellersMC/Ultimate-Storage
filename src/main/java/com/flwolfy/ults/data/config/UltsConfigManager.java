@@ -132,6 +132,7 @@ public final class UltsConfigManager {
       root = parsed.getAsJsonObject();
     }
     mergeDefaults(root, GSON.toJsonTree(UltsConfigData.DEFAULT).getAsJsonObject());
+    dropRetiredVisibility(root);
     UltsConfigData loaded = GSON.fromJson(root, UltsConfigData.class);
     if (loaded == null || !loaded.validate().isEmpty()) {
       throw new IllegalArgumentException("Invalid Ults config fields: "
@@ -140,6 +141,27 @@ public final class UltsConfigManager {
     loaded = loaded.canonicalize();
     save(loaded);
     return loaded;
+  }
+
+  /** A visibility mode that is not part of the mod any more falls back to the default one. */
+  private static void dropRetiredVisibility(JsonObject root) {
+    JsonElement general = root.get("general");
+    if (general == null || !general.isJsonObject()) {
+      return;
+    }
+    JsonObject object = general.getAsJsonObject();
+    JsonElement value = object.get("itemVisibility");
+    if (value == null || !value.isJsonPrimitive()) {
+      return;
+    }
+    try {
+      UltsItemVisibility.valueOf(value.getAsString());
+    } catch (IllegalArgumentException retired) {
+      String fallback = UltsConfigData.DEFAULT.general().itemVisibility().name();
+      object.addProperty("itemVisibility", fallback);
+      UltsMod.LOGGER.warn("UltStorage: unknown itemVisibility '{}' was replaced by '{}'",
+          value.getAsString(), fallback);
+    }
   }
 
   private static void mergeDefaults(JsonObject target, JsonObject defaults) {

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "ultimate-storage",
   "version": "${version}",
-  "name": "Ultimate-Storage",
+  "name": "UltStorage",
   "description": "A server-side, world-bound, shared item storage terminal system.",
   "authors": [
     "FLwolfy"
@@ -12,8 +12,8 @@
     "sources": "https://github.com/FLwolfy/Ultimate-Storage"
   },
   "license": "LGPL-3.0",
-  "icon": "assets/ultimate-storage/icon.png",
   "environment": "*",
+  "accessWidener": "ultimate-storage.accesswidener",
   "mixins": [
     "ultimate-storage.mixins.json"
   ],

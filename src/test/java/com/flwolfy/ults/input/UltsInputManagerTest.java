@@ -8,19 +8,26 @@ import org.junit.jupiter.api.Test;
 class UltsInputManagerTest {
 
   @Test
-  void acceptsTrimmedUnicodeNames() {
-    assertEquals("主仓库 一号", UltsInputManager.normalizeName("  主仓库 一号  "));
+  void acceptsTrimmedUnicodeNotes() {
+    assertEquals("主仓库 一号", UltsInputManager.normalizeNote("  主仓库 一号  "));
   }
 
   @Test
-  void rejectsEmptyControlAndOversizedNames() {
-    assertNull(UltsInputManager.normalizeName("   "));
-    assertNull(UltsInputManager.normalizeName("bad\nname"));
-    assertNull(UltsInputManager.normalizeName("x".repeat(65)));
+  void acceptsAnEmptyNote() {
+    // A note is optional, unlike the storage name it replaced.
+    assertEquals("", UltsInputManager.normalizeNote(""));
+    assertEquals("", UltsInputManager.normalizeNote("   "));
+  }
+
+  @Test
+  void rejectsControlOversizedAndFormattingNotes() {
+    assertNull(UltsInputManager.normalizeNote("bad\nname"));
+    assertNull(UltsInputManager.normalizeNote("x".repeat(65)));
+    assertNull(UltsInputManager.normalizeNote("\u00A7cRed"));
   }
 
   @Test
   void acceptsBoundaryLength() {
-    assertEquals("x".repeat(64), UltsInputManager.normalizeName("x".repeat(64)));
+    assertEquals("x".repeat(64), UltsInputManager.normalizeNote("x".repeat(64)));
   }
 }

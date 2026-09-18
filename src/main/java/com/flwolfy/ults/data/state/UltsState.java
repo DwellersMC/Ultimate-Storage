@@ -3,29 +3,37 @@ package com.flwolfy.ults.data.state;
 import com.flwolfy.ults.display.UltsCreativeCatalog;
 import com.mojang.serialization.Codec;
 import com.mojang.serialization.codecs.RecordCodecBuilder;
+import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
+import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.resources.Identifier;
 import net.minecraft.util.datafix.DataFixTypes;
-import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.component.ItemContainerContents;
-import net.minecraft.world.level.block.ShulkerBoxBlock;
 import net.minecraft.world.level.saveddata.SavedData;
 import net.minecraft.world.level.saveddata.SavedDataType;
 
+/**
+ * Saved state of the one server storage.
+ *
+ * <p>It owns an ordered list of container bindings ({@code #1 #2 ...}, each with an optional note for
+ * humans) and, in void mode, the single pool of stored items.
+ */
 public final class UltsState extends SavedData {
 
   private static final Codec<UltsState> CODEC = RecordCodecBuilder.create(instance ->
       instance.group(
-          UltsTerminal.CODEC.listOf().fieldOf("terminals").forGetter(state -> state.terminals),
-          UltsStoredEntry.CODEC.listOf().fieldOf("items").forGetter(state -> state.entries),
+          UltsBinding.CODEC.listOf().optionalFieldOf("bindings", List.of())
+              .forGetter(state -> state.bindings),
+          UltsStoredEntry.CODEC.listOf().optionalFieldOf("pool", List.of())
+              .forGetter(state -> state.pool),
           Codec.unboundedMap(Codec.STRING, UltsViewProfile.CODEC)
               .optionalFieldOf("viewProfiles", Map.of()).forGetter(state -> state.viewProfiles)
       ).apply(instance, UltsState::new)
@@ -38,56 +46,110 @@ public final class UltsState extends SavedData {
       DataFixTypes.LEVEL
   );
 
-  private final List<UltsTerminal> terminals = new ArrayList<>();
-  private final List<UltsStoredEntry> entries = new ArrayList<>();
+  private final List<UltsBinding> bindings = new ArrayList<>();
+  /** Position to binding, so a lookup by position never walks the whole list. */
+  private final Map<String, Long2ObjectMap<UltsBinding>> byPosition = new HashMap<>();
+  /** Binding to its current {@code #N} number, kept in step with the list order. */
+  private final Map<UltsBinding, Integer> numbers = new HashMap<>();
+  private final List<UltsStoredEntry> pool = new ArrayList<>();
   private final Map<String, UltsViewProfile> viewProfiles = new HashMap<>();
   private long revision;
 
   public UltsState() {}
 
   private UltsState(
-      List<UltsTerminal> terminals,
-      List<UltsStoredEntry> entries,
+      List<UltsBinding> bindings,
+      List<UltsStoredEntry> pool,
       Map<String, UltsViewProfile> viewProfiles
   ) {
-    this.terminals.addAll(terminals);
-    entries.stream().filter(entry -> !entry.template().isEmpty() && entry.amount() > 0)
-        .forEach(entry -> this.entries.add(new UltsStoredEntry(entry.template(), entry.amount())));
+    this.bindings.addAll(bindings);
+    this.pool.addAll(sanitize(pool));
     this.viewProfiles.putAll(viewProfiles);
+    reindex();
   }
 
-  public synchronized List<UltsTerminal> terminals() {
-    return List.copyOf(terminals);
+  private static List<UltsStoredEntry> sanitize(List<UltsStoredEntry> entries) {
+    List<UltsStoredEntry> clean = new ArrayList<>();
+    entries.stream().filter(entry -> !entry.template().isEmpty() && entry.amount() > 0)
+        .forEach(entry -> clean.add(new UltsStoredEntry(entry.template(), entry.amount())));
+    return clean;
   }
 
-  public synchronized UltsTerminal terminal(String name) {
-    String key = key(name);
-    return terminals.stream().filter(value -> key(value.name()).equals(key)).findFirst().orElse(null);
+  /** Rebuilds the position index and the numbering after a change to the list. */
+  private void reindex() {
+    byPosition.clear();
+    numbers.clear();
+    for (int index = 0; index < bindings.size(); index++) {
+      UltsBinding binding = bindings.get(index);
+      byPosition
+          .computeIfAbsent(binding.dimension(), key -> new Long2ObjectOpenHashMap<>())
+          .put(binding.pos().asLong(), binding);
+      numbers.put(binding, index + 1);
+    }
   }
 
-  public synchronized boolean addTerminal(UltsTerminal terminal) {
-    if (terminal(terminal.name()) != null || terminals.stream().anyMatch(existing ->
-        existing.dimension().equals(terminal.dimension())
-            && existing.basePos().equals(terminal.basePos()))) {
+  // =================== //
+  // ===== Bindings ==== //
+  // =================== //
+
+  /** Every binding, in the {@code #1 #2 ...} order shown by the listings. */
+  public synchronized List<UltsBinding> bindings() {
+    return List.copyOf(bindings);
+  }
+
+  public synchronized int bindingCount() {
+    return bindings.size();
+  }
+
+  /** The binding at a position, in constant time. */
+  public synchronized UltsBinding binding(String dimension, BlockPos position) {
+    Long2ObjectMap<UltsBinding> positions = byPosition.get(dimension);
+    return positions == null ? null : positions.get(position.asLong());
+  }
+
+  /** The current {@code #N} of a binding, or {@code 0} when it is not bound any more. */
+  public synchronized int number(UltsBinding binding) {
+    return numbers.getOrDefault(binding, 0);
+  }
+
+  public synchronized boolean addBinding(UltsBinding binding) {
+    if (binding(binding.dimension(), binding.pos()) != null) {
       return false;
     }
-    terminals.add(terminal);
+    bindings.add(binding);
+    reindex();
     changed();
     return true;
   }
 
-  public synchronized UltsTerminal removeTerminal(String name) {
-    UltsTerminal terminal = terminal(name);
-    if (terminal != null) {
-      terminals.remove(terminal);
+  /** Removes the 1-based inclusive range of bindings and returns what was removed. */
+  public synchronized List<UltsBinding> removeBindings(int from, int to) {
+    List<UltsBinding> removed = new ArrayList<>();
+    for (int index = from - 1; index <= to - 1 && index < bindings.size(); index++) {
+      if (index >= 0) {
+        removed.add(bindings.get(index));
+      }
+    }
+    if (!removed.isEmpty()) {
+      bindings.removeAll(removed);
+      // Removing re-numbers everything after the range, so the index is rebuilt once.
+      reindex();
       changed();
     }
-    return terminal;
+    return List.copyOf(removed);
   }
 
-  public synchronized boolean protects(String dimension, net.minecraft.core.BlockPos position) {
-    return terminals.stream().anyMatch(terminal -> terminal.dimension().equals(dimension)
-        && (terminal.basePos().equals(position) || terminal.barrelPos().equals(position)));
+  // ==================== //
+  // ===== Contents ===== //
+  // ==================== //
+
+  public synchronized List<UltsStoredView> items() {
+    return pool.stream()
+        .map(entry -> new UltsStoredView(
+            entry.template(), entry.amount(), !UltsCreativeCatalog.contains(entry.template())))
+        .sorted(Comparator.comparing(
+            value -> value.template().getHoverName().getString(), String.CASE_INSENSITIVE_ORDER))
+        .toList();
   }
 
   public synchronized void deposit(ItemStack source) {
@@ -95,44 +157,19 @@ public final class UltsState extends SavedData {
       return;
     }
     int outerCount = source.getCount();
-    if (source.getItem() instanceof BlockItem blockItem
-        && blockItem.getBlock() instanceof ShulkerBoxBlock) {
+    if (UltsBoxes.isShulker(source)) {
       ItemContainerContents contents = source.get(DataComponents.CONTAINER);
       ItemStack emptyBox = source.copyWithCount(1);
       emptyBox.set(DataComponents.CONTAINER, ItemContainerContents.fromItems(List.of()));
-      add(emptyBox, outerCount);
+      add(pool, emptyBox, outerCount);
       if (contents != null) {
         contents.allItemsCopyStream().forEach(inner ->
-            add(inner, Math.multiplyExact((long) inner.getCount(), outerCount)));
+            add(pool, inner, Math.multiplyExact((long) inner.getCount(), outerCount)));
       }
     } else {
-      add(source, outerCount);
+      add(pool, source, outerCount);
     }
     changed();
-  }
-
-  public synchronized ItemStack withdraw(ItemStack template, int requested) {
-    if (template.isEmpty() || requested < 1) {
-      return ItemStack.EMPTY;
-    }
-    for (int index = 0; index < entries.size(); index++) {
-      UltsStoredEntry entry = entries.get(index);
-      if (!ItemStack.isSameItemSameComponents(entry.template(), template)) {
-        continue;
-      }
-      if (entry.amount() < requested) {
-        return ItemStack.EMPTY;
-      }
-      long remaining = entry.amount() - requested;
-      if (remaining == 0) {
-        entries.remove(index);
-      } else {
-        entries.set(index, new UltsStoredEntry(entry.template(), remaining));
-      }
-      changed();
-      return entry.template().copyWithCount(requested);
-    }
-    return ItemStack.EMPTY;
   }
 
   public synchronized UltsWithdrawalPlan withdrawalPlan(
@@ -140,12 +177,12 @@ public final class UltsState extends SavedData {
       int quantity,
       boolean boxed
   ) {
-    long itemAvailable = amount(template);
-    long boxAvailable = emptyBoxAmount();
+    long itemAvailable = amount(pool, template);
+    long boxAvailable = packableBoxAmount(pool);
     if (template.isEmpty() || quantity < 1) {
       return plan(false, "invalid", itemAvailable, 0, boxAvailable, 0, List.of());
     }
-    if (boxed && isShulker(template)) {
+    if (boxed && UltsBoxes.isShulker(template)) {
       return plan(false, "nested_box", itemAvailable, 0, boxAvailable, quantity, List.of());
     }
     int outputCount = boxed ? quantity : (int) (
@@ -164,39 +201,34 @@ public final class UltsState extends SavedData {
       return plan(false, "boxes", itemAvailable, required, boxAvailable, requiredBoxes, List.of());
     }
     List<ItemStack> outputs = boxed
-        ? packedBoxes(template, requiredBoxes) : looseStacks(template, quantity);
+        ? packedBoxes(pool, template, requiredBoxes)
+        : UltsWithdrawalOutput.looseStacks(template, quantity);
     return plan(true, "", itemAvailable, required, boxAvailable, requiredBoxes, outputs);
   }
 
-  public synchronized List<ItemStack> takePlanned(
-      ItemStack template,
-      int quantity,
-      boolean boxed
-  ) {
+  public synchronized List<ItemStack> takePlanned(ItemStack template, int quantity, boolean boxed) {
     UltsWithdrawalPlan plan = withdrawalPlan(template, quantity, boxed);
     if (!plan.available()) {
       return List.of();
     }
-    consume(template, plan.itemRequired());
+    consume(pool, template, plan.itemRequired());
     if (plan.boxRequired() > 0) {
-      consumeEmptyBoxes(plan.boxRequired());
+      consumeEmptyBoxes(pool, plan.boxRequired());
     }
     changed();
     return plan.outputs().stream().map(ItemStack::copy).toList();
   }
 
-  public synchronized List<UltsStoredView> items() {
-    return entries.stream()
-        .map(entry -> new UltsStoredView(
-            entry.template(), entry.amount(), !UltsCreativeCatalog.contains(entry.template())))
-        .sorted(Comparator.comparing(
-            value -> value.template().getHoverName().getString(), String.CASE_INSENSITIVE_ORDER))
-        .toList();
+  public synchronized ItemStack availableBox() {
+    for (UltsStoredEntry entry : packableBoxes(pool)) {
+      return entry.template().copyWithCount(1);
+    }
+    return ItemStack.EMPTY;
   }
 
-  public synchronized long revision() {
-    return revision;
-  }
+  // ==================== //
+  // === View profiles === //
+  // ==================== //
 
   public synchronized UltsViewProfile viewProfile(UUID playerId) {
     return viewProfiles.getOrDefault(playerId.toString(), UltsViewProfile.DEFAULT);
@@ -208,44 +240,47 @@ public final class UltsState extends SavedData {
     }
   }
 
-  private long amount(ItemStack template) {
-    return entries.stream()
+  public synchronized long revision() {
+    return revision;
+  }
+
+  // ===================== //
+  // ====== Internals ===== //
+  // ===================== //
+
+  private static long amount(List<UltsStoredEntry> pool, ItemStack template) {
+    return pool.stream()
         .filter(entry -> ItemStack.isSameItemSameComponents(entry.template(), template))
         .mapToLong(UltsStoredEntry::amount)
         .sum();
   }
 
-  private long emptyBoxAmount() {
-    return entries.stream().filter(entry -> isEmptyShulker(entry.template()))
-        .mapToLong(UltsStoredEntry::amount).sum();
+  private static long packableBoxAmount(List<UltsStoredEntry> pool) {
+    return packableBoxes(pool).stream().mapToLong(UltsStoredEntry::amount).sum();
   }
 
-  private List<ItemStack> looseStacks(ItemStack template, int quantity) {
-    List<ItemStack> result = new ArrayList<>();
-    int remaining = quantity;
-    while (remaining > 0) {
-      int count = Math.min(remaining, template.getMaxStackSize());
-      result.add(template.copyWithCount(count));
-      remaining -= count;
-    }
-    return List.copyOf(result);
-  }
-
-  private List<ItemStack> packedBoxes(ItemStack template, int quantity) {
-    List<ItemStack> result = new ArrayList<>();
-    for (UltsStoredEntry entry : entries) {
-      if (!isEmptyShulker(entry.template())) {
-        continue;
+  // Empty shulker boxes in packing order: the default colour first, then the remaining colours.
+  private static List<UltsStoredEntry> packableBoxes(List<UltsStoredEntry> pool) {
+    List<UltsStoredEntry> boxes = new ArrayList<>();
+    for (UltsStoredEntry entry : pool) {
+      if (UltsBoxes.isPackable(entry.template())) {
+        boxes.add(entry);
       }
+    }
+    boxes.sort(Comparator.comparingInt(entry -> UltsBoxes.isPlain(entry.template()) ? 0 : 1));
+    return boxes;
+  }
+
+  private static List<ItemStack> packedBoxes(
+      List<UltsStoredEntry> pool,
+      ItemStack template,
+      int quantity
+  ) {
+    List<ItemStack> result = new ArrayList<>();
+    for (UltsStoredEntry entry : packableBoxes(pool)) {
       long count = Math.min(entry.amount(), quantity - result.size());
       for (long index = 0; index < count; index++) {
-        ItemStack box = entry.template().copyWithCount(1);
-        List<ItemStack> contents = new ArrayList<>(27);
-        for (int slot = 0; slot < 27; slot++) {
-          contents.add(template.copyWithCount(template.getMaxStackSize()));
-        }
-        box.set(DataComponents.CONTAINER, ItemContainerContents.fromItems(contents));
-        result.add(box);
+        result.add(UltsWithdrawalOutput.packedBox(entry.template(), template));
       }
       if (result.size() == quantity) {
         break;
@@ -254,9 +289,9 @@ public final class UltsState extends SavedData {
     return List.copyOf(result);
   }
 
-  private void consume(ItemStack template, long requested) {
-    for (int index = 0; index < entries.size() && requested > 0;) {
-      UltsStoredEntry entry = entries.get(index);
+  private static void consume(List<UltsStoredEntry> pool, ItemStack template, long requested) {
+    for (int index = 0; index < pool.size() && requested > 0;) {
+      UltsStoredEntry entry = pool.get(index);
       if (!ItemStack.isSameItemSameComponents(entry.template(), template)) {
         index++;
         continue;
@@ -264,49 +299,23 @@ public final class UltsState extends SavedData {
       long taken = Math.min(requested, entry.amount());
       requested -= taken;
       if (taken == entry.amount()) {
-        entries.remove(index);
+        pool.remove(index);
       } else {
-        entries.set(index, new UltsStoredEntry(entry.template(), entry.amount() - taken));
+        pool.set(index, new UltsStoredEntry(entry.template(), entry.amount() - taken));
         index++;
       }
     }
   }
 
-  private void consumeEmptyBoxes(long requested) {
-    for (int index = 0; index < entries.size() && requested > 0;) {
-      UltsStoredEntry entry = entries.get(index);
-      if (!isEmptyShulker(entry.template())) {
-        index++;
-        continue;
+  private static void consumeEmptyBoxes(List<UltsStoredEntry> pool, long requested) {
+    for (UltsStoredEntry entry : packableBoxes(pool)) {
+      if (requested <= 0) {
+        break;
       }
       long taken = Math.min(requested, entry.amount());
       requested -= taken;
-      if (taken == entry.amount()) {
-        entries.remove(index);
-      } else {
-        entries.set(index, new UltsStoredEntry(entry.template(), entry.amount() - taken));
-        index++;
-      }
+      consume(pool, entry.template(), taken);
     }
-  }
-
-  private static boolean isShulker(ItemStack stack) {
-    return stack.getItem() instanceof BlockItem blockItem
-        && blockItem.getBlock() instanceof ShulkerBoxBlock;
-  }
-
-  private static boolean isEmptyShulker(ItemStack stack) {
-    if (!isShulker(stack)) {
-      return false;
-    }
-    ItemContainerContents contents = stack.get(DataComponents.CONTAINER);
-    if (contents == null) {
-      return true;
-    }
-    for (var ignored : contents.nonEmptyItems()) {
-      return false;
-    }
-    return true;
   }
 
   private static UltsWithdrawalPlan plan(
@@ -322,13 +331,13 @@ public final class UltsState extends SavedData {
         available, problem, itemAvailable, itemRequired, boxAvailable, boxRequired, outputs);
   }
 
-  private void add(ItemStack source, long amount) {
+  private static void add(List<UltsStoredEntry> pool, ItemStack source, long amount) {
     if (source.isEmpty() || amount < 1) {
       return;
     }
     ItemStack template = source.copyWithCount(1);
-    for (int index = 0; index < entries.size(); index++) {
-      UltsStoredEntry entry = entries.get(index);
+    for (int index = 0; index < pool.size(); index++) {
+      UltsStoredEntry entry = pool.get(index);
       if (ItemStack.isSameItemSameComponents(entry.template(), template)) {
         long sum;
         try {
@@ -336,19 +345,15 @@ public final class UltsState extends SavedData {
         } catch (ArithmeticException ignored) {
           sum = Long.MAX_VALUE;
         }
-        entries.set(index, new UltsStoredEntry(template, sum));
+        pool.set(index, new UltsStoredEntry(template, sum));
         return;
       }
     }
-    entries.add(new UltsStoredEntry(template, amount));
+    pool.add(new UltsStoredEntry(template, amount));
   }
 
   private void changed() {
     revision++;
     setDirty();
-  }
-
-  private static String key(String value) {
-    return value.trim().toLowerCase(Locale.ROOT);
   }
 }

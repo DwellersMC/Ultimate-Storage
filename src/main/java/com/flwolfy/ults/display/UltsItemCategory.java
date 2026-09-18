@@ -12,21 +12,27 @@ public final class UltsItemCategory {
 
   private final String id;
   private final Component displayName;
+  private final String langKey;
   private final ItemStack icon;
   private final Map<Item, List<ItemStack>> entries;
+  private final List<ItemStack> templates;
   private final boolean special;
 
   UltsItemCategory(
       String id,
       Component displayName,
+      String langKey,
       ItemStack icon,
       Map<Item, List<ItemStack>> entries,
+      List<ItemStack> templates,
       boolean special
   ) {
     this.id = id;
     this.displayName = displayName.copy();
+    this.langKey = langKey == null ? "" : langKey;
     this.icon = icon.copyWithCount(1);
     this.entries = entries;
+    this.templates = templates;
     this.special = special;
   }
 
@@ -35,13 +41,17 @@ public final class UltsItemCategory {
   }
 
   public Component displayName() {
-    return special
-        ? UltsLangManager.getInstance().text("ults.gui.category.special_nbt")
-        : displayName.copy();
+    return langKey.isEmpty()
+        ? displayName.copy() : UltsLangManager.getInstance().text(langKey);
   }
 
   public ItemStack icon() {
     return icon.copyWithCount(1);
+  }
+
+  // Read-only catalog listing in creative-tab order; never mutate the returned stacks.
+  public List<ItemStack> templates() {
+    return templates;
   }
 
   public boolean accepts(UltsStoredView view) {
