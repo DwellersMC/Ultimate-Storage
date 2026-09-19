@@ -18,14 +18,15 @@ Storage belongs to the save, not to a name: a world has **one** storage, its inp
 - Bind containers by looking at them (`/ults bind`), each with an optional note
 - Bind a whole area at once (`/ults bindarea`), loaded chunks only
 - Storage screen built from the creative tabs discovered at runtime, so modded items appear automatically
-- Per-player persisted view: category, category page, item page and item-ID filter
+- Per-player persisted view: category, category page, item page, item-ID filter and item visibility
 - Withdrawal screen with an item mode and a full-box mode (shulker boxes)
 - Per-player container highlight (`/ults show` and `/ults hide`)
 - Bound blocks are **protected**: breaking them needs sneaking
 - A bound block that is destroyed anyway loses its binding, and a vanished block is detected automatically
-- Hopper input draining with a configurable drain interval and automatic idle skip
+- Hopper input draining that empties the hoppers of a bound container every tick in void mode, with a configurable drain interval and automatic idle skip
 - Multi-block containers: vanilla chests are recognised on their own, modded containers can be listed
-- Three item visibility modes, including a derived **survival obtainable** catalogue
+- Three item visibility modes, including a derived **survival obtainable** catalogue; the configured mode is the default and every player can switch their own with a right-click on the status book
+- Optional **automatic crafting**: when a withdrawal runs short, the storage crafts the missing part from what it has, following recipes down as far as it takes, using a stored crafting table or stonecutter
 - Two storage modes: a server-side void store or the bound containers themselves (remote)
 - Bundled `en_us`, `zh_cn` and `zh_tw` messages; further locales are discovered at runtime
 - **Cloth Config** API support through Mod Menu (client-side, optional)
@@ -49,7 +50,7 @@ Storage belongs to the save, not to a name: a world has **one** storage, its inp
 | `/ults hide`                               | Hide your highlight again                                                                   |
 | `/ults reload`                             | Reload `config/ults.json`                                                                   |
 
-`/ults` and `/ults list` are open to everyone. Binding, deleting, the highlight and reloading need the **management permission level** (`input.permissionLevel`, vanilla level `0`-`4`, default `2`); the server console is always allowed. `/ults list` only offers the click-to-delete action to players that may delete.
+`/ults` and `/ults list` are open to everyone. Binding a container, binding an area, deleting bindings, the highlight and reloading need the **management permission level** (`input.permissionLevel`, vanilla level `0`-`4`, default `2`); the server console is always allowed. `/ults list` only offers the click-to-delete action to players that may delete.
 
 `/ults bind` and `/ults delete` use a reach of 6 blocks. Binding and deleting work on any part of a large container, not only on the block that was bound first. A selection is written with a mandatory hash, so `#3` and `#3-#5` are valid while `3` is rejected with a hint.
 
@@ -78,7 +79,7 @@ config/ults.json
 {
   "general": {
     "language": "en_us",
-    "itemVisibility": "STOCKED_COMPACT",
+    "itemVisibility": "AVAILABLE",
     "storageMode": "VOID"
   },
   "input": {
@@ -101,17 +102,40 @@ A missing file, a missing field or an unknown enum value falls back to the defau
 | Field            | Type     | Description                                                                                                            |
 |------------------|----------|------------------------------------------------------------------------------------------------------------------------|
 | `language`       | `string` | Locale used for server-rendered messages, the command output and the storage UI; a bundled locale such as `en_us`.    |
-| `itemVisibility` | `enum`   | Which items the storage screen lists: `ALL`, `SURVIVAL` or `STOCKED_COMPACT`.                                           |
+| `itemVisibility` | `enum`   | Default visibility for players who have not chosen one themselves: `ALL`, `SURVIVAL` or `AVAILABLE`.                     |
 | `storageMode`    | `enum`   | Where the stored items live: `VOID` or `REMOTE`.                                                                        |
 
 ### Storage Settings
 
 | Field                   | Type       | Description                                                                                                                     |
 |-------------------------|------------|---------------------------------------------------------------------------------------------------------------------------------|
-| `permissionLevel`       | `int`      | Vanilla permission level `0`-`4` required to bind, delete, reload and toggle the highlight; defaults to `2`.                     |
+| `permissionLevel`       | `int`      | Vanilla permission level `0`-`4` required to bind a container, to bind an area, to delete bindings, to toggle the highlight and to reload; defaults to `2`. |
 | `maxBindings`           | `int`      | Maximum number of containers the storage may bind; `0` means unlimited.                                                          |
-| `drainInterval`         | `int`      | Ticks between two drain visits of the same bound container, from `1` to `20`; defaults to `2`.                                   |
+| `drainInterval`         | `int`      | Ticks between two drain visits of the same bound container, from `1` to `20`; defaults to `2`. The hoppers of an input path are emptied every tick regardless, see below. |
 | `multiBlockContainers`  | `string[]` | Block ids whose connected blocks together form one large container; see below. Empty by default.                                 |
+| `crafting`              | `enum`     | Whether a withdrawal may craft what is missing: `DISABLED`, `SHULKER_BOXES_ONLY` or `ALL`; see below. Disabled by default.       |
+
+---
+
+### Automatic Crafting
+
+With `input.crafting` enabled, a withdrawal that runs short is completed by crafting, as long as the storage holds the station the recipe needs; an item that is not stored at all but can be crafted can be withdrawn just the same:
+
+| Mode                  | Craftable                                                                                          |
+|-----------------------|----------------------------------------------------------------------------------------------------|
+| `DISABLED`            | Nothing. This is the default.                                                                       |
+| `SHULKER_BOXES_ONLY`  | Only an **uncolored shulker box**, which is what a full-box withdrawal packs into.                  |
+| `ALL`                 | Any item the stored station can produce.                                                            |
+
+- A crafting recipe needs a **crafting table** in the storage, a stonecutting recipe needs a **stonecutter**. The station is only used, never consumed.
+- Every item row of a craftable item shows how much of it could be crafted right now (`Craftable: N`). While automatic crafting is on but the station the recipe needs is not stored, the row says `Craftable: no station stored` instead, so a stored crafting table that went missing is visible. Rows of items that no stored station can produce keep no such line.
+- Recipes are followed **all the way down**: an ingredient the storage does not hold is crafted first, as many levels deep as it takes. Logs and shulker shells are therefore enough for a shulker box, because the plan makes the planks and then the chest on the way. `Shulker boxes only` works the same way, it just limits what the result may be. Recipes that feed each other, such as a block and its ingots, cannot make the search loop.
+- Routes are compared and the best one wins: whichever route produces the most from the current stock, and among those the one needing the fewest operations. A recipe that a stonecutter does in fewer operations is therefore preferred over the crafting table while a stonecutter is stored, and the crafting table takes over when no stonecutter is left.
+- Only the missing part is crafted. Withdrawing 64 of an item while 60 are stored and the recipe produces 4 per operation runs the recipe once and takes the remaining 60 from the stock. What a batch makes on the way and the request does not need, extra planks for example, stays in the storage instead of disappearing.
+- Recipes whose result or ingredients the game decides while it runs (dyeing, fireworks, banner and map copying, repairing, and the like) are not used.
+- The empty boxes of a full-box withdrawal are taken in the order **plain boxes in storage, then boxes crafted for the request, and only then the other colours**: a box that can be crafted is never passed over in favour of a coloured one, and when not all of them can be crafted, the colours cover what is left. The screen says how many stored boxes are used and how many are crafted before the confirm button is pressed.
+- The withdrawal screen lists what will be crafted before the confirm button is pressed.
+- `/ults reload` reads the recipes again, which is needed after a data pack changed them.
 
 ---
 
@@ -128,11 +152,13 @@ In `REMOTE` mode nothing is drained: the bound containers keep their items, so t
 
 ### Item Visibility Modes
 
-| Mode              | Listed items                                                                                                                       |
-|-------------------|------------------------------------------------------------------------------------------------------------------------------------|
-| `ALL`             | Every item and every category, even with nothing stored.                                                                            |
-| `SURVIVAL`        | Everything a survival player can obtain, plus anything that is stored. Categories without content are hidden.                       |
-| `STOCKED_COMPACT` | Only items in stock; categories without stock are hidden. This is the default.                                                      |
+| Mode        | Listed items                                                                                                                       |
+|-------------|------------------------------------------------------------------------------------------------------------------------------------|
+| `ALL`       | Every item and every category, even with nothing stored.                                                                            |
+| `SURVIVAL`  | Everything a survival player can obtain, plus anything that is stored. Categories without content are hidden.                       |
+| `AVAILABLE` | What the storage can hand over right now: everything in stock, plus everything that can be crafted at this moment while automatic crafting is on and a station is stored. Categories without such an item are hidden. This is the configured default. |
+
+The configured mode is the **default**, not a fixed setting: every player can switch their own mode with a right-click on the status book of the storage screen, and the choice is remembered with their other view settings. Showing everything is only on offer while the configured default already is `ALL`, or while the player may manage the storage, so a plain player cannot open a view the owner did not hand out. There is no way back to "default" other than switching again.
 
 #### How the survival catalogue is derived
 
@@ -199,6 +225,7 @@ Look at a container and run `/ults bind`; the note is free text of at most 64 ch
 | Drain interval             | Each binding is visited every `drainInterval` ticks, distributed over the ticks so a large warehouse is not visited at once.  |
 | Idle skip                  | A binding that produced nothing for a while is visited less often: every 2nd visit while a hopper path feeds it, every 8th visit otherwise. |
 | Hopper emptying            | Enabled hoppers that push into the bound container, or into another hopper of that path, are emptied and their transfer cooldown is reset; the chain is followed up to 8 hoppers deep. |
+| Hopper suction             | In `VOID` mode the hoppers of an input path are emptied **every tick**, not only on the drain schedule, so a bound container pulls items in as fast as its hoppers can push them: about one item per tick per hopper instead of the vanilla 8-tick cycle. |
 | Unloaded chunks            | Bindings in unloaded chunks are skipped and keep their contents until the chunk is loaded again.                              |
 | Vanished block             | A binding whose block is gone (air) is removed and reported to the players.                                                   |
 
@@ -210,12 +237,13 @@ Look at a container and run `/ults bind`; the note is free text of at most 64 ch
 
 ## Storage Screen
 
-`/ults` opens a 9×6 screen. The left column is the category pager: an up arrow, four category buttons and a down arrow. The next column is a divider, and the remaining 5×7 area shows up to 35 item rows per page. The top row of that area holds the previous-page arrow, a status book and the next-page arrow.
+`/ults` opens a 9×6 screen. The left column is the category pager: an up arrow, four category buttons and a down arrow. The next column is a divider, and the remaining 5×7 area shows up to 35 item rows per page. The top row of that area holds the previous-page arrow, a status book and the next-page arrow; while a single page is left, both item arrows are left out completely, because there is nowhere to turn to. The category arrows are always shown.
 
-- **Categories** are the creative tabs discovered when the world loads, plus **All Items** and **Special Data Items** (stored stacks whose components no creative tab describes). Tabs that hold nothing listable in the current visibility mode are hidden, while **All Items** always stays reachable.
-- **Status book** shows the selected category, the category page, the item page, how many item types are listed and stored, and the current filter; left-clicking it opens the **filter screen**, where a part of an item id (for example `diamond`) is typed, applied, or cleared.
-- **Item rows** show the stored amount, the equivalent in shulker boxes once it reaches a box, and open the **withdrawal screen** on a left click when something is stored.
-- The selected category, category page, item page and filter are saved per player in the world data, so everyone returns to their own view.
+- **Categories** are the creative tabs discovered when the world loads, plus **All Items** and **Special Data Items** (stored stacks whose components no creative tab describes). Tabs that hold nothing listable in the current visibility mode are hidden, while **All Items** always stays reachable. A list without a single row shows a paper in the middle of the item area instead.
+- **Status book** shows the selected category, the category page, the item page, how many item types are listed and stored, the current filter and the current visibility; left-clicking it opens the **filter screen**, where a part of an item id (for example `diamond`) is typed, applied, or cleared, and right-clicking it switches the visibility mode this player sees.
+- **Item rows** show the stored amount, the equivalent in shulker boxes once it reaches a box, and open the **withdrawal screen** on a left click while something is stored or automatic crafting could make the item right now.
+- The selected category, category page, item page, filter and visibility are saved per player in the world data, so everyone returns to their own view.
+- Clicking plays a short sound that only the clicking player hears: a light click for opening, paging, selecting and switching, and a brighter pickup sound for applying or confirming. Cancelling a screen stays silent.
 - Open screens refresh themselves when stored quantities change.
 
 ### Withdrawal Screen
@@ -227,7 +255,9 @@ The withdrawal screen asks for an amount above an anvil-style input and offers t
 | Item mode      | Withdraw that many loose items.                                                                            |
 | Full-box mode  | Treat the amount as a number of shulker boxes, consume that many empty boxes and fill each with 27 full stacks. |
 
-Confirmation stays unavailable and explains itself while the request cannot be fulfilled: a non-positive amount, packing shulker boxes inside shulker boxes, more than 36 result stacks, not enough stored items or empty boxes, or a backpack that cannot hold the complete result. Confirming revalidates everything and deducts atomically, so two players cannot withdraw the same items.
+The left slot of the anvil holds the cancel button, which returns to the storage screen, and the middle slot switches between the two modes. The middle slot also reports what the request needs: the stored amount, the amount asked for, how many items and how many boxes would be crafted, and in full-box mode how many empty boxes are available and how many of them are used. The cancel label is the first tooltip line of that button rather than its name, because the vanilla client copies the name of the item in this slot into the input field: a name would fill the field with the sentence and every later keystroke would be appended to it. Confirmation stays unavailable and explains itself while the request cannot be fulfilled: a non-positive amount, packing shulker boxes inside shulker boxes, more than 36 result stacks, not enough stored items or empty boxes, or a backpack that cannot hold the complete result. Confirming revalidates everything and deducts atomically, so two players cannot withdraw the same items.
+
+The filter screen uses the same three slots: cancel, clear the filter, and apply what was typed.
 
 ---
 

@@ -1,6 +1,10 @@
 package com.flwolfy.ults;
 
+import com.flwolfy.ults.crafting.UltsCraftCatalog;
+import com.flwolfy.ults.crafting.UltsCraftPool;
+import com.flwolfy.ults.crafting.UltsCraftResolver;
 import com.flwolfy.ults.data.config.UltsConfigManager;
+import com.flwolfy.ults.data.config.UltsCraftingMode;
 import com.flwolfy.ults.data.config.UltsStorageMode;
 import com.flwolfy.ults.data.lang.UltsLangManager;
 import com.flwolfy.ults.data.state.UltsBinding;
@@ -22,18 +26,27 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.permissions.LevelBasedPermissionSet;
+import net.minecraft.server.permissions.PermissionLevel;
+import net.minecraft.server.permissions.PermissionSet;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
+import org.jetbrains.annotations.Nullable;
 
 public final class UltsRuntime {
+
+  /** How often the "could this be crafted" answers are worked out again while contents keep changing. */
+  private static final long CRAFTABLE_REFRESH_TICKS = 20;
 
   /** How many slices the remote aggregate is computed in. */
   private static final int REMOTE_SHARDS = 8;
@@ -67,17 +80,45 @@ public final class UltsRuntime {
   private long shardTick = -1;
   private long remoteDemandTick = Long.MIN_VALUE / 2;
   private long remoteRevision;
+  /** Craftable amounts of the last render, dropped as soon as contents or mode change. */
+  private final Map<String, Long> craftableCache = new HashMap<>();
+  /** The contents those answers were worked out on, so a row never plans against a stale pile. */
+  private UltsCraftPool craftablePool = new UltsCraftPool(4);
+  private long craftableTick = Long.MIN_VALUE;
+  private long craftableRevision = -1L;
+  /** The contents the last summary was taken from, and the summary itself. */
+  private List<UltsStoredView> lastStock;
+  private long lastStockFingerprint;
+  private UltsCraftingMode craftableMode;
+  private long craftableFingerprint;
 
   UltsRuntime(MinecraftServer server) {
     this.server = server;
     UltsCreativeCatalog.rebuild(server);
     UltsSurvivalItems.rebuild(server);
+    UltsCraftCatalog.rebuild(server);
+    UltsMod.LOGGER.info("UltStorage automatic crafting is {}", craftingMode());
     state = server.overworld().getDataStorage().computeIfAbsent(UltsState.TYPE);
     inputs = new UltsInputManager(server, state);
   }
 
   public MinecraftServer server() {
     return server;
+  }
+
+  /**
+   * Whether a permission set may manage the storage, using the one configured level.
+   *
+   * @param permissions permissions of a command source or of a player
+   * @return whether binding, deleting, reloading and the highlight are allowed
+   */
+  public static boolean canManage(PermissionSet permissions) {
+    if (permissions == PermissionSet.ALL_PERMISSIONS) {
+      return true;
+    }
+    int required = UltsConfigManager.getInstance().data().input().permissionLevel();
+    return permissions instanceof LevelBasedPermissionSet levels
+        && levels.level().isEqualOrHigherThan(PermissionLevel.byId(required));
   }
 
   public UltsState state() {
@@ -115,19 +156,115 @@ public final class UltsRuntime {
     return remote() ? aggregate().items() : state.items();
   }
 
+  /** The configured crafting mode, which decides whether anything may be crafted at all. */
+  public UltsCraftingMode craftingMode() {
+    return UltsConfigManager.getInstance().data().input().crafting();
+  }
+
+  /**
+   * How many more of an item the storage could craft right now.
+   *
+   * @param template the item in question
+   * @return the largest amount the open crafting routes can produce, or {@code 0}
+   */
+  public long craftable(ItemStack template) {
+    return craftable(template, storedItems());
+  }
+
+  /**
+   * How many more of an item a given stock could craft right now.
+   *
+   * <p>A screen asks this once per item row, so the answer is remembered for the contents it was
+   * computed from: while nobody stores or sets anything, browsing a large storage costs one lookup per
+   * item instead of one per redraw. The revision, the mode and a cheap fingerprint of the contents are
+   * all part of that memory key, so an answer can never be reused for other contents.
+   *
+   * @param template the item in question
+   * @param stock contents to craft from, so a screen can reuse the list it already read
+   * @return the largest amount the open crafting routes can produce, or {@code 0}
+   */
+  public long craftable(ItemStack template, List<UltsStoredView> stock) {
+    return craftable(template, stock, true);
+  }
+
+  /**
+   * How much could be crafted if a station were stored.
+   *
+   * <p>Only used to explain the missing station on an item row, so it answers zero while crafting is
+   * off or while nothing could be crafted anyway.
+   *
+   * @param template the item in question
+   * @param stock contents to craft from
+   * @return the largest amount a station-less storage could produce, or {@code 0}
+   */
+  public long craftableWithoutStation(ItemStack template, List<UltsStoredView> stock) {
+    return craftable(template, stock, false);
+  }
+
+  private long craftable(ItemStack template, List<UltsStoredView> stock, boolean requireStation) {
+    long revision = contentRevision();
+    UltsCraftingMode mode = craftingMode();
+    long fingerprint = fingerprintOf(stock);
+    if (revision != craftableRevision || mode != craftableMode
+        || fingerprint != craftableFingerprint) {
+      long tick = server.getTickCount();
+      // A screen asks this per item, so a storage that changes every tick would otherwise work the
+      // whole catalog out every tick. The answers are allowed to be a moment old: a withdrawal is
+      // always planned again on the live contents.
+      if (craftableTick == Long.MIN_VALUE || tick - craftableTick >= CRAFTABLE_REFRESH_TICKS) {
+        craftableCache.clear();
+        craftablePool = UltsCraftPool.of(stock);
+        craftableRevision = revision;
+        craftableMode = mode;
+        craftableFingerprint = fingerprint;
+        craftableTick = tick;
+      }
+    }
+    String key = (requireStation ? "" : "station|")
+        + BuiltInRegistries.ITEM.getKey(template.getItem()) + "|"
+        + template.getComponentsPatch();
+    return craftableCache.computeIfAbsent(key, ignored -> UltsCraftResolver.capacity(
+        template, craftablePool, mode, requireStation));
+  }
+
+  /** A cheap summary of contents, so a cached answer can never be handed out for other contents. */
+  private static long fingerprint(List<UltsStoredView> stock) {
+    long hash = stock.size();
+    for (UltsStoredView view : stock) {
+      hash = hash * 31L + view.template().getItem().hashCode();
+      hash = hash * 31L + view.template().getComponentsPatch().hashCode();
+      hash = hash * 31L + view.amount();
+    }
+    return hash;
+  }
+
+  /** One screen render asks per item row, so the summary of its contents is only worked out once. */
+  private long fingerprintOf(List<UltsStoredView> stock) {
+    if (stock == lastStock) {
+      return lastStockFingerprint;
+    }
+    long value = fingerprint(stock);
+    lastStock = stock;
+    lastStockFingerprint = value;
+    return value;
+  }
+
+  /** The plan of one withdrawal, crafting included, without touching the storage. */
   public UltsWithdrawalPlan withdrawalPlan(ItemStack template, int quantity, boolean boxed) {
+    UltsCraftingMode mode = craftingMode();
     return remote()
-        ? UltsRemoteStorage.plan(aggregate(), template, quantity, boxed)
-        : state.withdrawalPlan(template, quantity, boxed);
+        ? UltsRemoteStorage.plan(aggregate(), template, quantity, boxed, mode)
+        : state.withdrawalPlan(template, quantity, boxed, mode);
   }
 
   /** Withdrawals always read the live containers, then drop the cached aggregate. */
   public List<ItemStack> takePlanned(ItemStack template, int quantity, boolean boxed) {
     if (!remote()) {
-      return state.takePlanned(template, quantity, boxed);
+      UltsWithdrawalPlan plan = state.withdrawalPlan(template, quantity, boxed, craftingMode());
+      return state.takePlanned(plan, template, quantity, boxed);
     }
     List<ItemStack> outputs = UltsRemoteStorage.take(
-        server, state.bindings(), template, quantity, boxed);
+        server, state.bindings(), template, quantity, boxed, craftingMode());
     invalidateRemote();
     return outputs;
   }

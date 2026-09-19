@@ -1,5 +1,7 @@
 package com.flwolfy.ults.data.state;
 
+import com.flwolfy.ults.crafting.UltsCraftPool;
+import com.flwolfy.ults.data.config.UltsCraftingMode;
 import com.flwolfy.ults.display.UltsCreativeCatalog;
 import com.flwolfy.ults.input.UltsContainers;
 import java.util.ArrayList;
@@ -19,6 +21,7 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.Container;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * Remote storage mode: the containers inside the bound areas are the storage.
@@ -52,14 +55,6 @@ public final class UltsRemoteStorage {
       return 0L;
     }
 
-    public long boxAmount() {
-      long total = 0L;
-      for (Boxes entry : boxes) {
-        total += entry.count();
-      }
-      return total;
-    }
-
     public ItemStack preferredBox() {
       for (Boxes entry : boxes) {
         if (UltsBoxes.isPlain(entry.template())) {
@@ -67,20 +62,6 @@ public final class UltsRemoteStorage {
         }
       }
       return boxes.isEmpty() ? ItemStack.EMPTY : boxes.getFirst().template().copyWithCount(1);
-    }
-
-    /** Boxes for a packed withdrawal, built from the boxes that are actually present. */
-    public List<ItemStack> packedBoxes(ItemStack template, int quantity) {
-      List<ItemStack> result = new ArrayList<>();
-      for (Boxes entry : boxes) {
-        for (long index = 0; index < entry.count() && result.size() < quantity; index++) {
-          result.add(UltsWithdrawalOutput.packedBox(entry.template(), template));
-        }
-        if (result.size() == quantity) {
-          break;
-        }
-      }
-      return List.copyOf(result);
     }
   }
 
@@ -158,71 +139,75 @@ public final class UltsRemoteStorage {
     variants.add(view);
   }
 
+  /**
+   * Whether one withdrawal would run, decided on the aggregated contents.
+   *
+   * @param snapshot aggregated contents
+   * @param template what is withdrawn
+   * @param quantity how much is withdrawn
+   * @param boxed whether the amount counts full boxes
+   * @param mode configured crafting mode
+   * @return the plan
+   */
   public static UltsWithdrawalPlan plan(
       Snapshot snapshot,
       ItemStack template,
       int quantity,
-      boolean boxed
+      boolean boxed,
+      UltsCraftingMode mode
   ) {
-    long itemAvailable = snapshot.amount(template);
-    long boxAvailable = snapshot.boxAmount();
-    if (template.isEmpty() || quantity < 1) {
-      return plan(false, "invalid", itemAvailable, 0, boxAvailable, 0, List.of());
-    }
-    if (boxed && UltsBoxes.isShulker(template)) {
-      return plan(false, "nested_box", itemAvailable, 0, boxAvailable, quantity, List.of());
-    }
-    int outputCount = boxed ? quantity : (int) (
-        ((long) quantity + template.getMaxStackSize() - 1) / template.getMaxStackSize());
-    if (outputCount > 36) {
-      return plan(false, "too_large", itemAvailable, quantity, boxAvailable,
-          boxed ? quantity : 0, List.of());
-    }
-    long required = boxed
-        ? (long) quantity * SHULKER_SLOTS * template.getMaxStackSize() : quantity;
-    int requiredBoxes = boxed ? quantity : 0;
-    if (itemAvailable < required) {
-      return plan(false, "items", itemAvailable, required, boxAvailable, requiredBoxes, List.of());
-    }
-    if (boxAvailable < requiredBoxes) {
-      return plan(false, "boxes", itemAvailable, required, boxAvailable, requiredBoxes, List.of());
-    }
-    List<ItemStack> outputs = boxed
-        ? snapshot.packedBoxes(template, requiredBoxes)
-        : UltsWithdrawalOutput.looseStacks(template, quantity);
-    if (outputs.size() < (boxed ? requiredBoxes : outputCount)) {
-      return plan(false, "boxes", itemAvailable, required, boxAvailable, requiredBoxes, List.of());
-    }
-    return plan(true, "", itemAvailable, required, boxAvailable, requiredBoxes, outputs);
+    return UltsWithdrawalPlanner.plan(
+        UltsCraftPool.of(snapshot.items()), template, quantity, boxed, mode);
   }
 
+  /**
+   * Runs one withdrawal against the containers themselves.
+   *
+   * <p>The plan is worked out on the live contents, then run on a copy of them, so what has to be
+   * taken out of the containers is exactly the difference between the two: everything a run made and
+   * the request did not need is put back instead of disappearing.
+   */
   public static List<ItemStack> take(
       MinecraftServer server,
       List<UltsBinding> bindings,
       ItemStack template,
       int quantity,
-      boolean boxed
+      boolean boxed,
+      UltsCraftingMode mode
   ) {
     Snapshot live = snapshot(server, bindings);
-    UltsWithdrawalPlan plan = plan(live, template, quantity, boxed);
+    UltsCraftPool before = UltsCraftPool.of(live.items());
+    UltsWithdrawalPlan plan = UltsWithdrawalPlanner.plan(
+        before.copy(), template, quantity, boxed, mode);
     if (!plan.available()) {
       return List.of();
     }
-    List<ItemStack> removed = new ArrayList<>();
-    if (!extract(
-        server, bindings,
-        stack -> ItemStack.isSameItemSameComponents(stack, template),
-        plan.itemRequired(), removed)) {
-      restore(server, bindings, removed);
+    UltsCraftPool after = before.copy();
+    if (!UltsWithdrawalPlanner.run(after, plan, template, quantity, boxed)) {
       return List.of();
     }
-    if (plan.boxRequired() > 0) {
-      List<ItemStack> boxes = new ArrayList<>();
-      if (!extract(server, bindings, UltsBoxes::isPackable, plan.boxRequired(), boxes)) {
+    List<ItemStack> removed = new ArrayList<>();
+    for (int index = 0; index < before.size(); index++) {
+      ItemStack kind = before.templateAt(index);
+      long used = before.amountAt(index) - after.amount(kind);
+      if (used > 0L && !extract(
+          server, bindings,
+          stack -> ItemStack.isSameItemSameComponents(stack, kind), used, removed)) {
         restore(server, bindings, removed);
-        restore(server, bindings, boxes);
         return List.of();
       }
+    }
+    // What a run made on the way stays in the storage: it was never asked for.
+    List<ItemStack> leftovers = new ArrayList<>();
+    for (int index = 0; index < after.size(); index++) {
+      ItemStack kind = after.templateAt(index);
+      long extra = after.amountAt(index) - before.amount(kind);
+      if (extra > 0L) {
+        leftovers.addAll(UltsWithdrawalOutput.stacks(kind, extra));
+      }
+    }
+    if (!leftovers.isEmpty() && !bindings.isEmpty()) {
+      restore(server, bindings, leftovers);
     }
     return plan.outputs().stream().map(ItemStack::copy).toList();
   }
@@ -266,6 +251,9 @@ public final class UltsRemoteStorage {
       long requested,
       List<ItemStack> removed
   ) {
+    if (requested <= 0) {
+      return true;
+    }
     long[] remaining = {requested};
     forEachContainer(server, bindings, container -> {
       if (remaining[0] <= 0) {
@@ -369,18 +357,5 @@ public final class UltsRemoteStorage {
     Identifier id = Identifier.tryParse(dimension);
     return id == null ? null
         : server.getLevel(ResourceKey.create(Registries.DIMENSION, id));
-  }
-
-  private static UltsWithdrawalPlan plan(
-      boolean available,
-      String problem,
-      long itemAvailable,
-      long itemRequired,
-      long boxAvailable,
-      int boxRequired,
-      List<ItemStack> outputs
-  ) {
-    return new UltsWithdrawalPlan(
-        available, problem, itemAvailable, itemRequired, boxAvailable, boxRequired, outputs);
   }
 }

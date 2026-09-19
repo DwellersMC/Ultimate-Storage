@@ -5,6 +5,7 @@ import static com.flwolfy.ults.util.UltsTextBuilder.success;
 
 import com.flwolfy.ults.UltsMod;
 import com.flwolfy.ults.UltsRuntime;
+import com.flwolfy.ults.crafting.UltsCraftCatalog;
 import com.flwolfy.ults.data.config.UltsConfigManager;
 import com.flwolfy.ults.data.lang.UltsLangManager;
 import com.flwolfy.ults.data.state.UltsBinding;
@@ -26,9 +27,6 @@ import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.server.permissions.LevelBasedPermissionSet;
-import net.minecraft.server.permissions.PermissionLevel;
-import net.minecraft.server.permissions.PermissionSet;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 
@@ -434,6 +432,13 @@ public final class UltsCommand {
   private static int reload(CommandContext<CommandSourceStack> context) {
     boolean success = UltsConfigManager.getInstance().reload();
     if (success) {
+      // The recipe list is server data, so a reload has to read it again as well.
+      UltsRuntime runtime = UltsMod.getRuntime();
+      if (runtime != null) {
+        UltsCraftCatalog.rebuild(runtime.server());
+        UltsMod.LOGGER.info(
+            "UltStorage reloaded; automatic crafting is {}", runtime.craftingMode());
+      }
       context.getSource().sendSuccess(
           () -> success(text("ults.command.reload.success")), false);
       return 1;
@@ -444,16 +449,7 @@ public final class UltsCommand {
 
   /** Binding, deleting, the highlight and reloading all need the one configured permission level. */
   private static boolean can(CommandSourceStack source) {
-    if (source.getEntity() == null) {
-      return true;
-    }
-    PermissionSet permissions = source.permissions();
-    if (permissions == PermissionSet.ALL_PERMISSIONS) {
-      return true;
-    }
-    int required = UltsConfigManager.getInstance().data().input().permissionLevel();
-    return permissions instanceof LevelBasedPermissionSet levels
-        && levels.level().isEqualOrHigherThan(PermissionLevel.byId(required));
+    return source.getEntity() == null || UltsRuntime.canManage(source.permissions());
   }
 
   private static UltsRuntime runtime(CommandContext<CommandSourceStack> context) {

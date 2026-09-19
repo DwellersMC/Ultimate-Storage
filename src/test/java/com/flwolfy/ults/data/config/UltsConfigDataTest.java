@@ -1,6 +1,7 @@
 package com.flwolfy.ults.data.config;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
@@ -30,16 +31,27 @@ class UltsConfigDataTest {
   void canonicalizeKeepsTheDrainIntervalAndPermission() {
     UltsConfigData data = new UltsConfigData(
         UltsConfigData.DEFAULT.general(),
-        new UltsConfigData.Input(3, 0, 7, java.util.List.of("modid:Big_Chest")));
+        new UltsConfigData.Input(
+            3, 0, 7, java.util.List.of("modid:Big_Chest"), UltsCraftingMode.ALL));
     assertEquals(7, data.canonicalize().input().drainInterval());
     assertEquals(3, data.canonicalize().input().permissionLevel());
     // Listed block ids are normalised and duplicates are dropped.
     assertEquals(java.util.List.of("modid:big_chest"),
         data.canonicalize().input().multiBlockContainers());
+    // The crafting mode is carried through untouched.
+    assertEquals(UltsCraftingMode.ALL, data.canonicalize().input().crafting());
   }
 
   @Test
   void multiBlockContainerListStartsEmpty() {
     assertEquals(java.util.List.of(), UltsConfigData.DEFAULT.input().multiBlockContainers());
+  }
+
+  @Test
+  void craftingIsOffByDefault() {
+    assertEquals(UltsCraftingMode.DISABLED, UltsConfigData.DEFAULT.input().crafting());
+    assertFalse(UltsConfigData.DEFAULT.input().crafting().enabled());
+    assertTrue(UltsCraftingMode.SHULKER_BOXES_ONLY.enabled());
+    assertTrue(UltsCraftingMode.ALL.enabled());
   }
 }

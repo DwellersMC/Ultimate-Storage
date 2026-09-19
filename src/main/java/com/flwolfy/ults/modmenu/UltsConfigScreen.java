@@ -3,6 +3,7 @@ package com.flwolfy.ults.modmenu;
 import com.flwolfy.ults.UltsMod;
 import com.flwolfy.ults.data.config.UltsConfigData;
 import com.flwolfy.ults.data.config.UltsConfigManager;
+import com.flwolfy.ults.data.config.UltsCraftingMode;
 import com.flwolfy.ults.data.config.UltsItemVisibility;
 import com.flwolfy.ults.data.config.UltsStorageMode;
 import com.flwolfy.ults.data.lang.UltsLangManager;
@@ -51,6 +52,7 @@ public final class UltsConfigScreen {
     Field<Integer> permission = new Field<>(current.input().permissionLevel());
     Field<Integer> maxBindings = new Field<>(current.input().maxBindings());
     Field<Integer> drainInterval = new Field<>(current.input().drainInterval());
+    Field<UltsCraftingMode> crafting = new Field<>(current.input().crafting());
     UltsBlockIdEditorModel multiBlock =
         new UltsBlockIdEditorModel(current.input().multiBlockContainers());
 
@@ -66,6 +68,7 @@ public final class UltsConfigScreen {
         permissionEntry(entries, permission),
         countEntry(entries, maxBindings, "max_bindings"),
         drainEntry(entries, drainInterval),
+        craftingEntry(entries, crafting),
         multiBlockEntry(entries, multiBlock, false)
     );
     List<AbstractConfigListEntry<?>> generalOverview = List.of(
@@ -77,6 +80,7 @@ public final class UltsConfigScreen {
         permissionEntry(entries, permission),
         countEntry(entries, maxBindings, "max_bindings"),
         drainEntry(entries, drainInterval),
+        craftingEntry(entries, crafting),
         multiBlockEntry(entries, multiBlock, true)
     );
 
@@ -94,7 +98,8 @@ public final class UltsConfigScreen {
               permission.resolve(),
               maxBindings.resolve(),
               drainInterval.resolve(),
-              multiBlock.values()
+              multiBlock.values(),
+              crafting.resolve()
           )
       ));
     });
@@ -204,6 +209,23 @@ public final class UltsConfigScreen {
             UltsConfigData.MIN_DRAIN_INTERVAL, UltsConfigData.MAX_DRAIN_INTERVAL)
         .setDefaultValue(UltsConfigData.DEFAULT.input().drainInterval())
         .setTooltip(Component.translatable(KEY + "drain_interval.tooltip"))
+        .build();
+    return field.track(entry);
+  }
+
+  /** Automatic crafting is off, limited to shulker boxes, or open to every recipe. */
+  private static AbstractConfigListEntry<?> craftingEntry(
+      ConfigEntryBuilder entries,
+      Field<UltsCraftingMode> field
+  ) {
+    AbstractConfigListEntry<UltsCraftingMode> entry = entries.startEnumSelector(
+            Component.translatable(KEY + "crafting"),
+            UltsCraftingMode.class,
+            field.initial())
+        .setDefaultValue(UltsConfigData.DEFAULT.input().crafting())
+        .setTooltip(Component.translatable(KEY + "crafting.tooltip"))
+        .setEnumNameProvider(value -> Component.translatable(
+            KEY + "crafting." + value.name().toLowerCase(Locale.ROOT)))
         .build();
     return field.track(entry);
   }

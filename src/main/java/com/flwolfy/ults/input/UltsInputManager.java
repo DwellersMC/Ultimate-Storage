@@ -53,12 +53,14 @@ public final class UltsInputManager {
   /** How often the bookkeeping of unbound containers is dropped, in ticks. */
   private static final int STATE_SWEEP_TICKS = 600;
 
-  /** Bookkeeping per binding: how often it was visited, how idle it is and whether it has hoppers. */
+  /** Bookkeeping per binding: how often it was visited, how idle it is and its hopper path. */
   private static final class DrainState {
 
     private int visits;
     private int idle;
     private boolean hopper;
+    /** Hoppers of the input path, found by the last full walk and emptied every tick in between. */
+    private List<BlockPos> path = List.of();
   }
 
   private final MinecraftServer server;
@@ -215,11 +217,43 @@ public final class UltsInputManager {
         }
       }
       boolean drained = drain(container);
-      quiet.hopper = drainInboundHoppers(level, binding.pos());
+      quiet.hopper = drainInboundHoppers(level, binding.pos(), quiet);
       quiet.idle = drained ? 0 : quiet.idle + 1;
+    }
+    if (voidMode) {
+      // The hoppers of an input path are emptied every tick and not only on the drain schedule, so a
+      // bound container pulls items in as fast as its hoppers can push them instead of waiting for the
+      // next visit. The path itself is only walked again by the loop above.
+      emptyHopperPaths(bindings, levels);
     }
     forgetUnbound(bindings);
     return List.copyOf(broken);
+  }
+
+  /** Empties every known hopper path, so a single item never waits for the drain interval. */
+  private void emptyHopperPaths(List<UltsBinding> bindings, Map<String, ServerLevel> levels) {
+    for (UltsBinding binding : bindings) {
+      DrainState quiet = drainStates.get(binding);
+      if (quiet == null || quiet.path.isEmpty()) {
+        continue;
+      }
+      ServerLevel level = levels.get(binding.dimension());
+      if (level == null) {
+        level = level(binding.dimension());
+        if (level == null) {
+          continue;
+        }
+        levels.put(binding.dimension(), level);
+      }
+      for (BlockPos position : quiet.path) {
+        if (!level.hasChunk(position.getX() >> 4, position.getZ() >> 4)
+            || !(level.getBlockEntity(position) instanceof HopperBlockEntity hopper)) {
+          continue;
+        }
+        drain(hopper);
+        ((UltsHopperAccessor) hopper).ults$setCooldown(0);
+      }
+    }
   }
 
   /** Drops the bookkeeping of containers that are not bound any more, checked now and then. */
@@ -247,9 +281,10 @@ public final class UltsInputManager {
    * redstone switched off keeps its contents and also stops the search, because nothing can flow
    * through it any more. Both halves of a double chest count as the same container.
    */
-  private boolean drainInboundHoppers(ServerLevel level, BlockPos containerPos) {
+  private boolean drainInboundHoppers(ServerLevel level, BlockPos containerPos, DrainState quiet) {
     boolean fed = false;
     Set<BlockPos> visited = new HashSet<>();
+    List<BlockPos> founded = new ArrayList<>();
     List<BlockPos> frontier = UltsContainers.parts(level, containerPos);
     for (int depth = 0; depth < MAX_HOPPER_DEPTH && !frontier.isEmpty(); depth++) {
       List<BlockPos> next = new ArrayList<>();
@@ -269,11 +304,13 @@ public final class UltsInputManager {
           fed = true;
           drain(hopper);
           ((UltsHopperAccessor) hopper).ults$setCooldown(0);
+          founded.add(candidate);
           next.add(candidate);
         }
       }
       frontier = next;
     }
+    quiet.path = List.copyOf(founded);
     return fed;
   }
 

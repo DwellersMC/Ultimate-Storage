@@ -13,10 +13,16 @@ public final class UltsWithdrawalOutput {
   private UltsWithdrawalOutput() {}
 
   public static List<ItemStack> looseStacks(ItemStack template, int quantity) {
+    return stacks(template, quantity);
+  }
+
+  /** Splits an amount of one item into as many full stacks as it needs. */
+  public static List<ItemStack> stacks(ItemStack template, long quantity) {
     List<ItemStack> result = new ArrayList<>();
-    int remaining = quantity;
+    long remaining = quantity;
+    int stackSize = template.getMaxStackSize();
     while (remaining > 0) {
-      int count = Math.min(remaining, template.getMaxStackSize());
+      int count = (int) Math.min(remaining, stackSize);
       result.add(template.copyWithCount(count));
       remaining -= count;
     }

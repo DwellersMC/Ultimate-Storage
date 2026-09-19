@@ -6,9 +6,11 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.flwolfy.ults.data.config.UltsItemVisibility;
 import java.util.List;
 import java.util.UUID;
 import net.minecraft.core.BlockPos;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtOps;
 import net.minecraft.nbt.Tag;
 import org.junit.jupiter.api.Test;
@@ -108,7 +110,8 @@ class UltsStateTest {
   void viewProfileIsStoredPerPlayer() {
     UltsState state = new UltsState();
     UUID player = UUID.randomUUID();
-    UltsViewProfile profile = new UltsViewProfile("minecraft:building_blocks", 2, 4, "");
+    UltsViewProfile profile = new UltsViewProfile(
+        "minecraft:building_blocks", 2, 4, "", UltsItemVisibility.SURVIVAL);
     state.setViewProfile(player, profile);
     assertEquals(profile, state.viewProfile(player));
     assertEquals(UltsViewProfile.DEFAULT, state.viewProfile(UUID.randomUUID()));
@@ -117,7 +120,8 @@ class UltsStateTest {
 
   @Test
   void viewProfilesNormalizePositionsAndFilter() {
-    UltsViewProfile profile = new UltsViewProfile("ultimate-storage:all", -3, -4, "  Diamond ");
+    UltsViewProfile profile = new UltsViewProfile(
+        "ultimate-storage:all", -3, -4, "  Diamond ", null);
     assertEquals(0, profile.categoryPage());
     assertEquals(0, profile.itemPage());
     assertEquals("diamond", profile.filter());
@@ -125,9 +129,26 @@ class UltsStateTest {
 
   @Test
   void viewProfileCodecRoundTripsEveryField() {
-    UltsViewProfile profile = new UltsViewProfile("ultimate-storage:all", 2, 5, "diamond");
+    UltsViewProfile profile = new UltsViewProfile(
+        "ultimate-storage:all", 2, 5, "diamond", UltsItemVisibility.AVAILABLE);
     Tag encoded = UltsViewProfile.CODEC.encodeStart(NbtOps.INSTANCE, profile).getOrThrow();
     assertEquals(profile, UltsViewProfile.CODEC.parse(NbtOps.INSTANCE, encoded).getOrThrow());
+  }
+
+  @Test
+  void viewProfileKeepsAProfileWithoutAVisibilityAndDropsUnknownModes() {
+    // A profile written before the visibility could be chosen still loads.
+    UltsViewProfile old = new UltsViewProfile("ultimate-storage:all", 1, 2, "stone", null);
+    Tag encoded = UltsViewProfile.CODEC.encodeStart(NbtOps.INSTANCE, old).getOrThrow();
+    assertEquals(old, UltsViewProfile.CODEC.parse(NbtOps.INSTANCE, encoded).getOrThrow());
+
+    // A mode the enum does not know counts as "never chosen", so the configured default applies.
+    UltsViewProfile chosen = new UltsViewProfile(
+        "ultimate-storage:all", 1, 2, "stone", UltsItemVisibility.ALL);
+    CompoundTag edited = (CompoundTag) UltsViewProfile.CODEC
+        .encodeStart(NbtOps.INSTANCE, chosen).getOrThrow();
+    edited.putString("visibility", "SOMETHING_ELSE");
+    assertNull(UltsViewProfile.CODEC.parse(NbtOps.INSTANCE, edited).getOrThrow().visibility());
   }
 
   private static UltsBinding binding(String note, int x, int y, int z) {

@@ -1,5 +1,6 @@
 package com.flwolfy.ults.data.state;
 
+import java.util.List;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.ItemStack;

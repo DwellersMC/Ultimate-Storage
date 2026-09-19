@@ -134,6 +134,7 @@ public final class UltsConfigManager {
     }
     mergeDefaults(root, GSON.toJsonTree(UltsConfigData.DEFAULT).getAsJsonObject());
     dropRetiredVisibility(root);
+    dropRetiredCrafting(root);
     UltsConfigData loaded = GSON.fromJson(root, UltsConfigData.class);
     if (loaded == null || !loaded.validate().isEmpty()) {
       throw new IllegalArgumentException("Invalid Ults config fields: "
@@ -161,6 +162,27 @@ public final class UltsConfigManager {
       String fallback = UltsConfigData.DEFAULT.general().itemVisibility().name();
       object.addProperty("itemVisibility", fallback);
       UltsMod.LOGGER.warn("UltStorage: unknown itemVisibility '{}' was replaced by '{}'",
+          value.getAsString(), fallback);
+    }
+  }
+
+  /** A crafting mode that is not part of the mod any more falls back to the default one. */
+  private static void dropRetiredCrafting(JsonObject root) {
+    JsonElement input = root.get("input");
+    if (input == null || !input.isJsonObject()) {
+      return;
+    }
+    JsonObject object = input.getAsJsonObject();
+    JsonElement value = object.get("crafting");
+    if (value == null || !value.isJsonPrimitive()) {
+      return;
+    }
+    try {
+      UltsCraftingMode.valueOf(value.getAsString());
+    } catch (IllegalArgumentException retired) {
+      String fallback = UltsConfigData.DEFAULT.input().crafting().name();
+      object.addProperty("crafting", fallback);
+      UltsMod.LOGGER.warn("UltStorage: unknown crafting '{}' was replaced by '{}'",
           value.getAsString(), fallback);
     }
   }

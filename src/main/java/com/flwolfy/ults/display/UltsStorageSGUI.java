@@ -2,6 +2,7 @@ package com.flwolfy.ults.display;
 
 import com.flwolfy.ults.UltsRuntime;
 import com.flwolfy.ults.data.config.UltsConfigManager;
+import com.flwolfy.ults.data.config.UltsCraftingMode;
 import com.flwolfy.ults.data.config.UltsItemVisibility;
 import com.flwolfy.ults.data.state.UltsStoredView;
 import com.flwolfy.ults.data.state.UltsViewProfile;
@@ -16,6 +17,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import net.minecraft.ChatFormatting;
@@ -50,6 +52,8 @@ public final class UltsStorageSGUI extends SimpleGui {
   private int categoryPage;
   private int itemPage;
   private String filter;
+  /** The visibility this player picked for themselves, or {@code null} while the default applies. */
+  private UltsItemVisibility chosenVisibility;
   private long renderedRevision = -1;
 
   private UltsStorageSGUI(ServerPlayer player, UltsRuntime runtime) {
@@ -60,6 +64,7 @@ public final class UltsStorageSGUI extends SimpleGui {
     categoryPage = profile.categoryPage();
     itemPage = profile.itemPage();
     filter = profile.filter();
+    chosenVisibility = profile.visibility();
     setTitle(UltsGuiText.text("ults.gui.title"));
     setLockPlayerInventory(true);
     synchronized (OPEN_MENUS) {
@@ -109,11 +114,10 @@ public final class UltsStorageSGUI extends SimpleGui {
       setSlot(slot, content.build());
     }
 
-    UltsItemVisibility visibility = UltsConfigManager.getInstance().data().general()
-        .itemVisibility();
+    UltsItemVisibility visibility = effectiveVisibility();
     List<UltsStoredView> stored = runtime.storedItems();
     Map<Item, List<UltsStoredView>> byItem = index(stored);
-    List<UltsItemCategory> categories = visibleCategories(visibility, byItem);
+    List<UltsItemCategory> categories = visibleCategories(visibility, byItem, stored);
     if (category == null && !categories.isEmpty()) {
       category = categories.getFirst();
     }
@@ -134,7 +138,7 @@ public final class UltsStorageSGUI extends SimpleGui {
     for (int index = 0; index < visibleCategories; index++) {
       setSlot(CATEGORY_SLOTS[index], categoryButton(categories.get(firstCategory + index)));
     }
-    // The category paging arrows stay in place no matter how many categories exist.
+    // The category arrows are always shown, whatever the number of categories.
     setSlot(CATEGORY_UP_SLOT, arrow(
         "MHF_ArrowUp", "ults.gui.category.previous", () -> changeCategoryPage(-1, categoryPages),
         "ults.gui.category.page", categoryPage + 1, categoryPages));
@@ -148,23 +152,33 @@ public final class UltsStorageSGUI extends SimpleGui {
     int firstItem = itemPage * CONTENT_SLOTS.length;
     int lastItem = Math.min(firstItem + CONTENT_SLOTS.length, items.size());
     for (int index = firstItem; index < lastItem; index++) {
-      setSlot(CONTENT_SLOTS[index - firstItem], itemButton(items.get(index)));
+      setSlot(CONTENT_SLOTS[index - firstItem], itemButton(items.get(index), stored));
+    }
+    if (items.isEmpty()) {
+      // Nothing to show: the middle of the item area says so instead of staying empty.
+      setSlot(CONTENT_SLOTS[CONTENT_SLOTS.length / 2], element(Items.PAPER)
+          .setName(UltsGuiText.text("ults.gui.empty").copy().withStyle(ChatFormatting.GRAY))
+          .build());
     }
 
-    setSlot(PREVIOUS_PAGE_SLOT, arrow(
-        "MHF_ArrowLeft", "ults.gui.previous", () -> changeItemPage(-1, itemPages),
-        "ults.gui.page", itemPage + 1, itemPages));
-    setSlot(NEXT_PAGE_SLOT, arrow(
-        "MHF_ArrowRight", "ults.gui.next", () -> changeItemPage(1, itemPages),
-        "ults.gui.page", itemPage + 1, itemPages));
+    // A list that fits in one page has nothing to turn to, so the arrows are left out completely.
+    if (itemPages > 1) {
+      setSlot(PREVIOUS_PAGE_SLOT, arrow(
+          "MHF_ArrowLeft", "ults.gui.previous", () -> changeItemPage(-1, itemPages),
+          "ults.gui.page", itemPage + 1, itemPages));
+      setSlot(NEXT_PAGE_SLOT, arrow(
+          "MHF_ArrowRight", "ults.gui.next", () -> changeItemPage(1, itemPages),
+          "ults.gui.page", itemPage + 1, itemPages));
+    }
     setSlot(STATUS_SLOT, statusButton(
-        selectedIndex, categories.size(), items, categoryPage, categoryPages, itemPages));
+        selectedIndex, categories.size(), items, stored, categoryPage, categoryPages, itemPages));
     saveView();
   }
 
   private List<UltsItemCategory> visibleCategories(
       UltsItemVisibility visibility,
-      Map<Item, List<UltsStoredView>> byItem
+      Map<Item, List<UltsStoredView>> byItem,
+      List<UltsStoredView> stock
   ) {
     List<UltsItemCategory> categories = UltsCreativeCatalog.categories();
     if (visibility == UltsItemVisibility.ALL) {
@@ -174,7 +188,7 @@ public final class UltsStorageSGUI extends SimpleGui {
     return categories.stream()
         .filter(value -> UltsCreativeCatalog.ALL_ID.equals(value.id())
             || value.templates().stream().anyMatch(
-                template -> listed(visibility, template, amountOf(byItem, template))))
+                template -> listed(visibility, template, amountOf(byItem, template), stock)))
         .toList();
   }
 
@@ -186,14 +200,21 @@ public final class UltsStorageSGUI extends SimpleGui {
    * is). An item that only exists as variants is listed through those variants, and which of them
    * survival can really produce is decided per type afterwards.
    */
-  private static boolean listed(UltsItemVisibility visibility, ItemStack template, long amount) {
+  private boolean listed(
+      UltsItemVisibility visibility,
+      ItemStack template,
+      long amount,
+      List<UltsStoredView> stock
+  ) {
     if (amount > 0) {
       return true;
     }
     return switch (visibility) {
       case ALL -> true;
       case SURVIVAL -> base(template);
-      case STOCKED_COMPACT -> false;
+      // Everything the storage can hand over right now: an item that can be crafted at this moment
+      // counts as well, which needs the crafting mode to be on and a station to be stored.
+      case AVAILABLE -> runtime.craftable(template, stock) > 0;
     };
   }
 
@@ -320,9 +341,10 @@ public final class UltsStorageSGUI extends SimpleGui {
       listed = computed;
     }
     if (visibility != UltsItemVisibility.ALL) {
-      // Survival keeps everything a survival player can obtain, the other mode only what is stocked.
+      // Survival keeps everything a survival player can obtain, the available mode what the storage
+      // can hand over right now, crafting included.
       listed = listed.stream()
-          .filter(view -> listed(visibility, view.template(), view.amount()))
+          .filter(view -> listed(visibility, view.template(), view.amount(), stored))
           .toList();
       if (visibility == UltsItemVisibility.SURVIVAL) {
         listed = onePerItem(listed);
@@ -342,6 +364,7 @@ public final class UltsStorageSGUI extends SimpleGui {
             selected ? ChatFormatting.GREEN : ChatFormatting.GRAY))
         .addLoreLine(UltsGuiText.text("ults.gui.category.select"))
         .setCallback(() -> {
+          UltsGuiSound.click(player);
           category = value;
           itemPage = 0;
           render();
@@ -352,7 +375,7 @@ public final class UltsStorageSGUI extends SimpleGui {
     return builder;
   }
 
-  private GuiElementBuilder itemButton(UltsStoredView view) {
+  private GuiElementBuilder itemButton(UltsStoredView view, List<UltsStoredView> stock) {
     ItemStack template = view.template();
     long amount = view.amount();
     GuiElementBuilder builder = new GuiElementBuilder(template.copyWithCount(1))
@@ -362,12 +385,27 @@ public final class UltsStorageSGUI extends SimpleGui {
     if (boxSize > 0 && amount >= boxSize) {
       builder.addLoreLine(UltsGuiText.boxes(amount / boxSize, amount % boxSize));
     }
-    if (amount > 0) {
+    long craftable = runtime.craftable(template, stock);
+    if (craftable > 0) {
+      builder.addLoreLine(UltsGuiText.labelled(
+          "ults.gui.craftable", UltsGuiText.format(craftable), false));
+    } else if (runtime.craftableWithoutStation(template, stock) > 0) {
+      // The recipe is there and the material is there, only the station is missing: say so instead of
+      // hiding the line, so it is obvious why nothing can be crafted.
+      builder.addLoreLine(UltsGuiText.labelled(
+          "ults.gui.craftable",
+          UltsGuiText.text("ults.gui.craftable.no_station").getString(),
+          true));
+    }
+    // A row opens the withdrawal screen while the storage holds the item or could craft it, so an
+    // item that is not stored but can be made right now is just as usable.
+    if (amount > 0 || craftable > 0) {
       builder
           .addLoreLine(UltsGuiText.text("ults.gui.open_withdraw").copy()
               .withStyle(ChatFormatting.GRAY))
           .setCallback((slot, type, action, gui) -> {
             if (type == ClickType.MOUSE_LEFT) {
+              UltsGuiSound.click(player);
               UltsWithdrawSGUI.open(player, runtime, template);
             }
           });
@@ -379,6 +417,7 @@ public final class UltsStorageSGUI extends SimpleGui {
       int selectedIndex,
       int categoryCount,
       List<UltsStoredView> items,
+      List<UltsStoredView> stock,
       int categoryPage,
       int categoryPages,
       int itemPages
@@ -404,14 +443,25 @@ public final class UltsStorageSGUI extends SimpleGui {
             "ults.gui.types", "ults.gui.types.suffix", items.size(), false))
         .addLoreLine(UltsGuiText.labelled(
             "ults.gui.types.stored", "ults.gui.types.stored.suffix", stocked, false))
+        .addLoreLine(UltsGuiText.labelled(
+            "ults.gui.visibility",
+            UltsGuiText.text("ults.config.item_visibility."
+                + effectiveVisibility().name().toLowerCase(Locale.ROOT)).getString(),
+            false))
         .addLoreLine(filter.isEmpty()
             ? UltsGuiText.label("ults.gui.filter.none")
             : UltsGuiText.labelled("ults.gui.filter", filter, false))
         .addLoreLine(UltsGuiText.text("ults.gui.filter.open").copy()
             .withStyle(ChatFormatting.GRAY))
+        .addLoreLine(UltsGuiText.text("ults.gui.visibility.open").copy()
+            .withStyle(ChatFormatting.GRAY))
         .setCallback((slot, type, action, gui) -> {
           if (type == ClickType.MOUSE_LEFT) {
+            UltsGuiSound.click(player);
             UltsFilterSGUI.open(player, runtime);
+          } else if (type == ClickType.MOUSE_RIGHT) {
+            UltsGuiSound.click(player);
+            cycleVisibility();
           }
         });
     if (!filter.isEmpty()) {
@@ -432,8 +482,45 @@ public final class UltsStorageSGUI extends SimpleGui {
         .setName(UltsGuiText.text(key).copy().withStyle(ChatFormatting.YELLOW))
         .addLoreLine(UltsGuiText.text(loreKey, loreArguments).copy()
             .withStyle(ChatFormatting.GRAY))
-        .setCallback(callback)
+        .setCallback(() -> {
+          UltsGuiSound.click(player);
+          callback.run();
+        })
         .build();
+  }
+
+  /** The visibility this player sees: their own choice, or the configured default until they pick one. */
+  private UltsItemVisibility effectiveVisibility() {
+    return chosenVisibility != null ? chosenVisibility : configVisibility();
+  }
+
+  private static UltsItemVisibility configVisibility() {
+    return UltsConfigManager.getInstance().data().general().itemVisibility();
+  }
+
+  /**
+   * Whether this player may switch to a mode.
+   *
+   * <p>Showing everything is only on offer while the server default already does, or while the player
+   * may manage the storage, so a plain player cannot open a view the owner did not want to hand out.
+   */
+  private boolean mayChoose(UltsItemVisibility value) {
+    return value != UltsItemVisibility.ALL
+        || configVisibility() == UltsItemVisibility.ALL
+        || UltsRuntime.canManage(player.permissions());
+  }
+
+  /** Switches to the next mode this player may use and remembers the choice with their view. */
+  private void cycleVisibility() {
+    UltsItemVisibility next = effectiveVisibility();
+    for (int step = 0; step < UltsItemVisibility.values().length; step++) {
+      next = next.next();
+      if (mayChoose(next)) {
+        break;
+      }
+    }
+    chosenVisibility = next;
+    render();
   }
 
   private void changeItemPage(int offset, int pages) {
@@ -449,7 +536,7 @@ public final class UltsStorageSGUI extends SimpleGui {
   private void saveView() {
     runtime.state().setViewProfile(player.getUUID(), new UltsViewProfile(
         category == null ? UltsCreativeCatalog.ALL_ID : category.id(), categoryPage, itemPage,
-        filter));
+        filter, chosenVisibility));
   }
 
   private static GuiElementBuilder element(net.minecraft.world.item.Item item) {

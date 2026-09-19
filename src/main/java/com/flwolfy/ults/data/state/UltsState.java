@@ -1,5 +1,7 @@
 package com.flwolfy.ults.data.state;
 
+import com.flwolfy.ults.crafting.UltsCraftPool;
+import com.flwolfy.ults.data.config.UltsCraftingMode;
 import com.flwolfy.ults.display.UltsCreativeCatalog;
 import com.mojang.serialization.Codec;
 import com.mojang.serialization.codecs.RecordCodecBuilder;
@@ -19,6 +21,7 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.component.ItemContainerContents;
 import net.minecraft.world.level.saveddata.SavedData;
 import net.minecraft.world.level.saveddata.SavedDataType;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * Saved state of the one server storage.
@@ -175,46 +178,33 @@ public final class UltsState extends SavedData {
   public synchronized UltsWithdrawalPlan withdrawalPlan(
       ItemStack template,
       int quantity,
-      boolean boxed
+      boolean boxed,
+      UltsCraftingMode mode
   ) {
-    long itemAvailable = amount(pool, template);
-    long boxAvailable = packableBoxAmount(pool);
-    if (template.isEmpty() || quantity < 1) {
-      return plan(false, "invalid", itemAvailable, 0, boxAvailable, 0, List.of());
-    }
-    if (boxed && UltsBoxes.isShulker(template)) {
-      return plan(false, "nested_box", itemAvailable, 0, boxAvailable, quantity, List.of());
-    }
-    int outputCount = boxed ? quantity : (int) (
-        ((long) quantity + template.getMaxStackSize() - 1) / template.getMaxStackSize());
-    if (outputCount > 36) {
-      return plan(false, "too_large", itemAvailable, quantity, boxAvailable,
-          boxed ? quantity : 0, List.of());
-    }
-    long required = boxed
-        ? (long) quantity * 27L * template.getMaxStackSize() : quantity;
-    int requiredBoxes = boxed ? quantity : 0;
-    if (itemAvailable < required) {
-      return plan(false, "items", itemAvailable, required, boxAvailable, requiredBoxes, List.of());
-    }
-    if (boxAvailable < requiredBoxes) {
-      return plan(false, "boxes", itemAvailable, required, boxAvailable, requiredBoxes, List.of());
-    }
-    List<ItemStack> outputs = boxed
-        ? packedBoxes(pool, template, requiredBoxes)
-        : UltsWithdrawalOutput.looseStacks(template, quantity);
-    return plan(true, "", itemAvailable, required, boxAvailable, requiredBoxes, outputs);
+    return UltsWithdrawalPlanner.plan(craftPool(), template, quantity, boxed, mode);
   }
 
-  public synchronized List<ItemStack> takePlanned(ItemStack template, int quantity, boolean boxed) {
-    UltsWithdrawalPlan plan = withdrawalPlan(template, quantity, boxed);
+  /**
+   * Runs a decided withdrawal.
+   *
+   * <p>The plan is run twice: once on a copy, so a storage that changed since the screen was drawn
+   * can never leave a half done craft behind, and then for real.
+   */
+  public synchronized List<ItemStack> takePlanned(
+      UltsWithdrawalPlan plan,
+      ItemStack template,
+      int quantity,
+      boolean boxed
+  ) {
     if (!plan.available()) {
       return List.of();
     }
-    consume(pool, template, plan.itemRequired());
-    if (plan.boxRequired() > 0) {
-      consumeEmptyBoxes(pool, plan.boxRequired());
+    UltsCraftPool contents = craftPool();
+    if (!UltsWithdrawalPlanner.run(contents.copy(), plan, template, quantity, boxed)) {
+      return List.of();
     }
+    UltsWithdrawalPlanner.run(contents, plan, template, quantity, boxed);
+    adoptPool(contents);
     changed();
     return plan.outputs().stream().map(ItemStack::copy).toList();
   }
@@ -248,87 +238,33 @@ public final class UltsState extends SavedData {
   // ====== Internals ===== //
   // ===================== //
 
-  private static long amount(List<UltsStoredEntry> pool, ItemStack template) {
-    return pool.stream()
-        .filter(entry -> ItemStack.isSameItemSameComponents(entry.template(), template))
-        .mapToLong(UltsStoredEntry::amount)
-        .sum();
+  /** The stored items as a working pile, which is what a withdrawal plans and runs on. */
+  private UltsCraftPool craftPool() {
+    UltsCraftPool contents = new UltsCraftPool(pool.size() + 8);
+    for (UltsStoredEntry entry : pool) {
+      contents.add(entry.template(), entry.amount());
+    }
+    return contents;
   }
 
-  private static long packableBoxAmount(List<UltsStoredEntry> pool) {
-    return packableBoxes(pool).stream().mapToLong(UltsStoredEntry::amount).sum();
+  /** Writes a pile back as the stored items. */
+  private void adoptPool(UltsCraftPool contents) {
+    pool.clear();
+    for (UltsStoredView view : contents.views()) {
+      pool.add(new UltsStoredEntry(view.template(), view.amount()));
+    }
   }
 
   // Empty shulker boxes in packing order: the default colour first, then the remaining colours.
   private static List<UltsStoredEntry> packableBoxes(List<UltsStoredEntry> pool) {
     List<UltsStoredEntry> boxes = new ArrayList<>();
     for (UltsStoredEntry entry : pool) {
-      if (UltsBoxes.isPackable(entry.template())) {
+      if (UltsBoxes.isPackable(entry.template()) && entry.amount() > 0) {
         boxes.add(entry);
       }
     }
     boxes.sort(Comparator.comparingInt(entry -> UltsBoxes.isPlain(entry.template()) ? 0 : 1));
     return boxes;
-  }
-
-  private static List<ItemStack> packedBoxes(
-      List<UltsStoredEntry> pool,
-      ItemStack template,
-      int quantity
-  ) {
-    List<ItemStack> result = new ArrayList<>();
-    for (UltsStoredEntry entry : packableBoxes(pool)) {
-      long count = Math.min(entry.amount(), quantity - result.size());
-      for (long index = 0; index < count; index++) {
-        result.add(UltsWithdrawalOutput.packedBox(entry.template(), template));
-      }
-      if (result.size() == quantity) {
-        break;
-      }
-    }
-    return List.copyOf(result);
-  }
-
-  private static void consume(List<UltsStoredEntry> pool, ItemStack template, long requested) {
-    for (int index = 0; index < pool.size() && requested > 0;) {
-      UltsStoredEntry entry = pool.get(index);
-      if (!ItemStack.isSameItemSameComponents(entry.template(), template)) {
-        index++;
-        continue;
-      }
-      long taken = Math.min(requested, entry.amount());
-      requested -= taken;
-      if (taken == entry.amount()) {
-        pool.remove(index);
-      } else {
-        pool.set(index, new UltsStoredEntry(entry.template(), entry.amount() - taken));
-        index++;
-      }
-    }
-  }
-
-  private static void consumeEmptyBoxes(List<UltsStoredEntry> pool, long requested) {
-    for (UltsStoredEntry entry : packableBoxes(pool)) {
-      if (requested <= 0) {
-        break;
-      }
-      long taken = Math.min(requested, entry.amount());
-      requested -= taken;
-      consume(pool, entry.template(), taken);
-    }
-  }
-
-  private static UltsWithdrawalPlan plan(
-      boolean available,
-      String problem,
-      long itemAvailable,
-      long itemRequired,
-      long boxAvailable,
-      int boxRequired,
-      List<ItemStack> outputs
-  ) {
-    return new UltsWithdrawalPlan(
-        available, problem, itemAvailable, itemRequired, boxAvailable, boxRequired, outputs);
   }
 
   private static void add(List<UltsStoredEntry> pool, ItemStack source, long amount) {

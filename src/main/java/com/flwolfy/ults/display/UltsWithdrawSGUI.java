@@ -27,7 +27,8 @@ public final class UltsWithdrawSGUI extends UltsAnvilInputGui {
     this.template = template.copyWithCount(1);
     setTitle(UltsGuiText.text("ults.withdraw.title"));
     setLockPlayerInventory(true);
-    setDefaultInputValue("1");
+    setDefaultInputValue("");
+    showCancelSlot();
     synchronized (OPEN_MENUS) {
       OPEN_MENUS.add(new WeakReference<>(this));
     }
@@ -58,6 +59,10 @@ public final class UltsWithdrawSGUI extends UltsAnvilInputGui {
     render();
   }
 
+  /**
+   * Fills the two action slots. The input slot keeps the cancel action and is never rewritten here,
+   * because the client mirrors the name of that slot into its input field.
+   */
   private void render() {
     renderedRevision = runtime.contentRevision();
     String input = getInput();
@@ -67,9 +72,11 @@ public final class UltsWithdrawSGUI extends UltsAnvilInputGui {
     boolean inventorySpace = plan.available() && canFit(plan.outputs());
     boolean confirmable = plan.available() && inventorySpace;
 
-    GuiElementBuilder selected = new GuiElementBuilder(template.copyWithCount(1))
-        .glow()
-        .setName(Component.literal(input))
+    ItemStack availableBox = runtime.availableBox();
+    ItemStack boxIcon = availableBox.isEmpty() ? new ItemStack(Items.SHULKER_BOX) : availableBox;
+    GuiElementBuilder mode = new GuiElementBuilder(boxed ? boxIcon : template.copyWithCount(1))
+        .setName(UltsGuiText.text(boxed ? "ults.withdraw.mode.box" : "ults.withdraw.mode.item")
+            .copy().withStyle(ChatFormatting.YELLOW))
         .addLoreLine(template.getHoverName().copy().withStyle(UltsTextBuilder.HIGHLIGHT))
         .addLoreLine(UltsGuiText.labelled(
             "ults.withdraw.available", plan.itemAvailable(), plan.itemAvailable() < 1))
@@ -78,27 +85,32 @@ public final class UltsWithdrawSGUI extends UltsAnvilInputGui {
             quantity == null ? "-" : UltsGuiText.format(quantity),
             quantity == null));
     if (boxed) {
-      selected
+      mode
           .addLoreLine(UltsGuiText.labelled(
               "ults.withdraw.boxes_available", plan.boxAvailable(), plan.boxAvailable() < 1))
+          .addLoreLine(UltsGuiText.labelled(
+              "ults.withdraw.boxes_used", plan.boxStored(), plan.boxStored() < 1))
           .addLoreLine(UltsGuiText.labelled(
               "ults.withdraw.items_required",
               plan.itemRequired(),
               plan.itemRequired() > plan.itemAvailable()));
     }
-    setSlot(0, selected.build());
-
-    ItemStack availableBox = runtime.availableBox();
-    ItemStack boxIcon = availableBox.isEmpty() ? new ItemStack(Items.SHULKER_BOX) : availableBox;
-    setSlot(1, new GuiElementBuilder(boxed ? boxIcon : template.copyWithCount(1))
-        .setName(UltsGuiText.text(boxed ? "ults.withdraw.mode.box" : "ults.withdraw.mode.item")
-            .copy().withStyle(ChatFormatting.YELLOW))
-        .addLoreLine(UltsGuiText.text("ults.withdraw.mode.toggle").copy()
-            .withStyle(ChatFormatting.GRAY))
-        .setCallback(() -> {
-          boxed = !boxed;
-          render();
-        }).build());
+    if (plan.craftItems() > 0) {
+      mode.addLoreLine(UltsGuiText.labelled(
+          "ults.withdraw.craft", UltsGuiText.format(plan.craftItems()), false));
+    }
+    if (plan.boxCrafted() > 0) {
+      mode.addLoreLine(UltsGuiText.labelled(
+          "ults.withdraw.craft.boxes", plan.boxCrafted(), false));
+    }
+    mode.addLoreLine(UltsGuiText.text("ults.withdraw.mode.toggle").copy()
+        .withStyle(ChatFormatting.GRAY));
+    mode.setCallback(() -> {
+      UltsGuiSound.click(player);
+      boxed = !boxed;
+      render();
+    });
+    setSlot(1, mode.build());
 
     GuiElementBuilder confirm = new GuiElementBuilder(
         confirmable ? Items.DYE.lime() : Items.BARRIER)
@@ -111,10 +123,18 @@ public final class UltsWithdrawSGUI extends UltsAnvilInputGui {
       confirm.addLoreLine(UltsGuiText.text(boxed
           ? "ults.withdraw.confirm.box" : "ults.withdraw.confirm.item", quantity)
           .copy().withStyle(ChatFormatting.GREEN));
-      confirm.setCallback(() -> confirm(quantity));
+      confirm.setCallback(() -> {
+        UltsGuiSound.confirm(player);
+        confirm(quantity);
+      });
     }
     setSlot(2, confirm.build());
-    syncActionSlots();
+  }
+
+  @Override
+  protected void cancel() {
+    close();
+    UltsStorageSGUI.open(player, runtime);
   }
 
   private void confirm(int quantity) {

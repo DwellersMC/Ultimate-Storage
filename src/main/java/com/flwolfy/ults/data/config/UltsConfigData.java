@@ -22,12 +22,13 @@ public record UltsConfigData(General general, Input input) {
       int permissionLevel,
       int maxBindings,
       int drainInterval,
-      List<String> multiBlockContainers
+      List<String> multiBlockContainers,
+      UltsCraftingMode crafting
   ) {}
 
   public static final UltsConfigData DEFAULT = new UltsConfigData(
-      new General("en_us", UltsItemVisibility.STOCKED_COMPACT, UltsStorageMode.VOID),
-      new Input(2, 0, 2, List.of())
+      new General("en_us", UltsItemVisibility.AVAILABLE, UltsStorageMode.VOID),
+      new Input(2, 0, 2, List.of(), UltsCraftingMode.DISABLED)
   );
 
   public List<String> validate() {
@@ -58,6 +59,9 @@ public record UltsConfigData(General general, Input input) {
             value -> value == null || Identifier.tryParse(value) == null)) {
       invalid.add("input.multiBlockContainers");
     }
+    if (input == null || input.crafting() == null) {
+      invalid.add("input.crafting");
+    }
     return List.copyOf(invalid);
   }
 
@@ -75,7 +79,8 @@ public record UltsConfigData(General general, Input input) {
             input.multiBlockContainers().stream()
                 .map(value -> value.trim().toLowerCase(Locale.ROOT))
                 .distinct()
-                .toList()
+                .toList(),
+            input.crafting()
         )
     );
   }
