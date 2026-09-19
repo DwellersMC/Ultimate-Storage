@@ -106,7 +106,7 @@
   "ults.config.all": "All",
   "ults.config.general": "General",
   "ults.config.input": "Storage",
-  "ults.config.local_only": "This screen only saves this client's local config/ults/ults.json. Run /ults reload on an integrated server to apply it; it cannot modify a remote dedicated server.",
+  "ults.config.local_only": "This screen only saves this client's local config/ults.json. Run /ults reload on an integrated server to apply it; it cannot modify a remote dedicated server.",
   "ults.config.language": "Server message language",
   "ults.config.language.tooltip": "Language used for server-rendered commands and storage UI.",
   "ults.config.language.invalid": "Select a bundled language locale.",

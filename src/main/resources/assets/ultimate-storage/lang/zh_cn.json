@@ -106,7 +106,7 @@
   "ults.config.all": "全部",
   "ults.config.general": "常规",
   "ults.config.input": "存储",
-  "ults.config.local_only": "此界面只保存当前客户端本地的 config/ults/ults.json；可在集成服务器执行 /ults reload 应用，无法修改远程独立服务器。",
+  "ults.config.local_only": "此界面只保存当前客户端本地的 config/ults.json；可在集成服务器执行 /ults reload 应用，无法修改远程独立服务器。",
   "ults.config.language": "服务端消息语言",
   "ults.config.language.tooltip": "用于服务端渲染的命令反馈与存储界面。",
   "ults.config.language.invalid": "请选择模组内置的语言区域。",

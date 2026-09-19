@@ -47,7 +47,7 @@ Storage belongs to the save, not to a name: a world has **one** storage, its inp
 | `/ults list (page)`                        | List all bindings as `#N <dimension, (x, y, z)> note`; the lines are clickable while allowed |
 | `/ults show`                               | Show the highlight of nearby bound containers to you                                        |
 | `/ults hide`                               | Hide your highlight again                                                                   |
-| `/ults reload`                             | Reload `config/ults/ults.json`                                                              |
+| `/ults reload`                             | Reload `config/ults.json`                                                                   |
 
 `/ults` and `/ults list` are open to everyone. Binding, deleting, the highlight and reloading need the **management permission level** (`input.permissionLevel`, vanilla level `0`-`4`, default `2`); the server console is always allowed. `/ults list` only offers the click-to-delete action to players that may delete.
 
@@ -69,7 +69,7 @@ Storage belongs to the save, not to a name: a world has **one** storage, its inp
 ### Configuration File Location
 
 ```
-config/ults/ults.json
+config/ults.json
 ```
 
 ### Example Structure
@@ -247,7 +247,7 @@ Bindings and per-player view profiles are stored in the overworld `SavedData` of
 
 ## Cloth Config Support
 
-With **Cloth Config API** and **Mod Menu** installed on a client, every setting can be changed in-game. The screen edits only that client's local `config/ults/ults.json`; it cannot modify a remote dedicated server. Saving validates and atomically writes UTF-8 JSON, and a block id that names no block of the running game is highlighted while typing and blocks the save. Run `/ults reload` on an integrated server to apply the file.
+With **Cloth Config API** and **Mod Menu** installed on a client, every setting can be changed in-game. The screen edits only that client's local `config/ults.json`; it cannot modify a remote dedicated server. Saving validates and atomically writes UTF-8 JSON, and a block id that names no block of the running game is highlighted while typing and blocks the save. Run `/ults reload` on an integrated server to apply the file.
 
 ---
 

@@ -106,7 +106,7 @@
   "ults.config.all": "全部",
   "ults.config.general": "一般",
   "ults.config.input": "儲存",
-  "ults.config.local_only": "此畫面只儲存目前客戶端本機的 config/ults/ults.json；可在整合伺服器執行 /ults reload 套用，無法修改遠端獨立伺服器。",
+  "ults.config.local_only": "此畫面只儲存目前客戶端本機的 config/ults.json；可在整合伺服器執行 /ults reload 套用，無法修改遠端獨立伺服器。",
   "ults.config.language": "伺服器訊息語言",
   "ults.config.language.tooltip": "用於伺服器產生的指令回饋與儲存畫面。",
   "ults.config.language.invalid": "請選擇模組內建的語言地區。",

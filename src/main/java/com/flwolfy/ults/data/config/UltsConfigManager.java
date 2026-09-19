@@ -17,8 +17,9 @@ import net.fabricmc.loader.api.FabricLoader;
 
 public final class UltsConfigManager {
 
+  /** The configuration file sits directly in the config directory, like the other mods of this project. */
   private static final Path CONFIG_PATH = FabricLoader.getInstance().getConfigDir()
-      .resolve("ults").resolve("ults.json");
+      .resolve("ults.json");
   private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
   private static final ReentrantReadWriteLock LOCK = new ReentrantReadWriteLock();
   private static final UltsConfigManager INSTANCE = new UltsConfigManager();

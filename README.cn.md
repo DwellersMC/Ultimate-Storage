@@ -47,7 +47,7 @@ See the English document [here](./README.md).
 | `/ults list (页码)`                        | 以 `#N <维度, (x, y, z)> 备注` 列出全部绑定，有权者可直接点击删除                     |
 | `/ults show`                               | 为自己显示附近被绑定容器的高亮框                                                      |
 | `/ults hide`                               | 关闭自己的高亮                                                                        |
-| `/ults reload`                             | 重新加载 `config/ults/ults.json`                                                      |
+| `/ults reload`                             | 重新加载 `config/ults.json`                                                          |
 
 `/ults` 与 `/ults list` 对所有人开放。绑定、删除、高亮与重载需要**管理权限等级**（`input.permissionLevel`，原版等级 `0`-`4`，默认 `2`）；服务器控制台始终允许。`/ults list` 只会向有权删除的玩家提供点击删除。
 
@@ -69,7 +69,7 @@ See the English document [here](./README.md).
 ### 配置文件位置
 
 ```
-config/ults/ults.json
+config/ults.json
 ```
 
 ### 示例结构
@@ -247,7 +247,7 @@ Minecraft 没有「生存可获取」标记，所以目录在存档加载时由�
 
 ## Cloth Config 支持
 
-客户端安装 **Cloth Config API** 与 **Mod Menu** 后，所有设置都能在游戏内修改。该界面只编辑此客户端的本地 `config/ults/ults.json`，无法修改远程专用服务器。保存时会校验并以 UTF-8 原子写入 JSON；指向本游戏中不存在方块的 id 会在输入时标红并阻止保存。在集成服务器上执行 `/ults reload` 让文件生效。
+客户端安装 **Cloth Config API** 与 **Mod Menu** 后，所有设置都能在游戏内修改。该界面只编辑此客户端的本地 `config/ults.json`，无法修改远程专用服务器。保存时会校验并以 UTF-8 原子写入 JSON；指向本游戏中不存在方块的 id 会在输入时标红并阻止保存。在集成服务器上执行 `/ults reload` 让文件生效。
 
 ---
 
