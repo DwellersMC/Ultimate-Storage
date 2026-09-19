@@ -6,6 +6,9 @@ import com.flwolfy.ults.data.config.UltsConfigManager;
 import com.flwolfy.ults.data.config.UltsItemVisibility;
 import com.flwolfy.ults.data.config.UltsStorageMode;
 import com.flwolfy.ults.data.lang.UltsLangManager;
+import com.flwolfy.ults.modmenu.entry.UltsBlockIdListEntry;
+import com.flwolfy.ults.modmenu.entry.UltsSectionEntry;
+import com.flwolfy.ults.modmenu.model.UltsBlockIdEditorModel;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -14,10 +17,8 @@ import me.shedaniel.clothconfig2.api.AbstractConfigListEntry;
 import me.shedaniel.clothconfig2.api.ConfigBuilder;
 import me.shedaniel.clothconfig2.api.ConfigCategory;
 import me.shedaniel.clothconfig2.api.ConfigEntryBuilder;
-import me.shedaniel.clothconfig2.gui.entries.SubCategoryListEntry;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.components.toasts.SystemToast;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
@@ -47,23 +48,25 @@ public final class UltsConfigScreen {
     Field<String> language = new Field<>(current.general().language());
     Field<UltsItemVisibility> itemVisibility = new Field<>(current.general().itemVisibility());
     Field<UltsStorageMode> storageMode = new Field<>(current.general().storageMode());
-    Field<Integer> bindPermission = new Field<>(current.input().bindPermissionLevel());
-    Field<Integer> deletePermission = new Field<>(current.input().deletePermissionLevel());
+    Field<Integer> permission = new Field<>(current.input().permissionLevel());
     Field<Integer> maxBindings = new Field<>(current.input().maxBindings());
     Field<Integer> drainInterval = new Field<>(current.input().drainInterval());
+    UltsBlockIdEditorModel multiBlock =
+        new UltsBlockIdEditorModel(current.input().multiBlockContainers());
 
-    // Every section is shown twice: once in its own tab and once inside the "all" overview, so each
-    // copy reports back into the shared field and the changed copy wins when the screen is saved.
+    // Every section is shown twice: once in its own tab and once inside the "all" overview. Scalar
+    // settings share a field, so the copy that was changed away from the loaded value wins; the block
+    // id list shares a model instead, which keeps both copies in step while they are edited.
     List<AbstractConfigListEntry<?>> generalEntries = List.of(
         languageEntry(entries, language),
         itemVisibilityEntry(entries, itemVisibility),
         storageModeEntry(entries, storageMode)
     );
     List<AbstractConfigListEntry<?>> inputEntries = List.of(
-        permissionEntry(entries, bindPermission, "bind_permission"),
-        permissionEntry(entries, deletePermission, "delete_permission"),
+        permissionEntry(entries, permission),
         countEntry(entries, maxBindings, "max_bindings"),
-        drainEntry(entries, drainInterval)
+        drainEntry(entries, drainInterval),
+        multiBlockEntry(entries, multiBlock, false)
     );
     List<AbstractConfigListEntry<?>> generalOverview = List.of(
         languageEntry(entries, language),
@@ -71,85 +74,50 @@ public final class UltsConfigScreen {
         storageModeEntry(entries, storageMode)
     );
     List<AbstractConfigListEntry<?>> inputOverview = List.of(
-        permissionEntry(entries, bindPermission, "bind_permission"),
-        permissionEntry(entries, deletePermission, "delete_permission"),
+        permissionEntry(entries, permission),
         countEntry(entries, maxBindings, "max_bindings"),
-        drainEntry(entries, drainInterval)
+        drainEntry(entries, drainInterval),
+        multiBlockEntry(entries, multiBlock, true)
     );
 
     generalEntries.forEach(general::addEntry);
     inputEntries.forEach(input::addEntry);
-    all.addEntry(subCategory("general", generalOverview));
-    all.addEntry(subCategory("input", inputOverview));
+    all.addEntry(subCategory(entries, "general", generalOverview));
+    all.addEntry(subCategory(entries, "input", inputOverview));
 
-    builder.setSavingRunnable(() -> save(new UltsConfigData(
-        new UltsConfigData.General(
-            language.resolve(), itemVisibility.resolve(), storageMode.resolve()),
-        new UltsConfigData.Input(
-            bindPermission.resolve(),
-            deletePermission.resolve(),
-            maxBindings.resolve(),
-            drainInterval.resolve()
-        )
-    )));
+    builder.setSavingRunnable(() -> {
+      multiBlock.flush();
+      save(multiBlock, new UltsConfigData(
+          new UltsConfigData.General(
+              language.resolve(), itemVisibility.resolve(), storageMode.resolve()),
+          new UltsConfigData.Input(
+              permission.resolve(),
+              maxBindings.resolve(),
+              drainInterval.resolve(),
+              multiBlock.values()
+          )
+      ));
+    });
     return builder.build();
   }
 
+  /**
+   * Header of one section inside the "all" overview.
+   *
+   * <p>The overview mirrors the tabs, so the errors a section reports are already shown by the tab
+   * copy of the same entries and are hidden here.
+   */
   private static AbstractConfigListEntry<?> subCategory(
+      ConfigEntryBuilder entries,
       String key,
       List<AbstractConfigListEntry<?>> children
   ) {
     return new UltsSectionEntry(
+        entries,
         Component.translatable(KEY + key).withStyle(ChatFormatting.YELLOW, ChatFormatting.BOLD),
         children,
+        true,
         true);
-  }
-
-  /**
-   * Section header of the "all" overview.
-   *
-   * <p>Cloth paints sub-category headers through its own edit-aware colours and its label colour hook
-   * is final, so the header is drawn here instead: the built-in label is blanked out and the title is
-   * rendered bold yellow at all times.
-   */
-  private static final class UltsSectionEntry extends SubCategoryListEntry {
-
-    private static final int SECTION_COLOR = 0xFFFFFF55;
-
-    private final Component header;
-
-    @SuppressWarnings({"rawtypes", "unchecked"})
-    private UltsSectionEntry(
-        Component title,
-        List<AbstractConfigListEntry<?>> children,
-        boolean expanded
-    ) {
-      super(title, (List) children, expanded);
-      header = title;
-    }
-
-    @Override
-    public Component getDisplayedFieldName() {
-      return Component.empty();
-    }
-
-    @Override
-    public void extractRenderState(
-        GuiGraphicsExtractor graphics,
-        int index,
-        int y,
-        int x,
-        int entryWidth,
-        int entryHeight,
-        int mouseX,
-        int mouseY,
-        boolean hovered,
-        float delta
-    ) {
-      super.extractRenderState(
-          graphics, index, y, x, entryWidth, entryHeight, mouseX, mouseY, hovered, delta);
-      graphics.text(Minecraft.getInstance().font, header, x, y + 6, SECTION_COLOR);
-    }
   }
 
   private static AbstractConfigListEntry<?> languageEntry(
@@ -199,15 +167,15 @@ public final class UltsConfigScreen {
     return field.track(entry);
   }
 
+  /** One permission level covers binding, deleting, the highlight and reloading. */
   private static AbstractConfigListEntry<?> permissionEntry(
       ConfigEntryBuilder entries,
-      Field<Integer> field,
-      String key
+      Field<Integer> field
   ) {
     AbstractConfigListEntry<Integer> entry = entries.startIntSlider(
-            Component.translatable(KEY + key), field.initial(), 0, 4)
-        .setDefaultValue(field.initial())
-        .setTooltip(Component.translatable(KEY + key + ".tooltip"))
+            Component.translatable(KEY + "permission"), field.initial(), 0, 4)
+        .setDefaultValue(UltsConfigData.DEFAULT.input().permissionLevel())
+        .setTooltip(Component.translatable(KEY + "permission.tooltip"))
         .build();
     return field.track(entry);
   }
@@ -240,7 +208,37 @@ public final class UltsConfigScreen {
     return field.track(entry);
   }
 
-  private static void save(UltsConfigData data) {
+  /**
+   * Block ids whose directly connected blocks together form one large container.
+   *
+   * <p>The All-category copy only mirrors the list, so it hides the validation errors the tab copy
+   * already reports.
+   */
+  private static AbstractConfigListEntry<?> multiBlockEntry(
+      ConfigEntryBuilder entries,
+      UltsBlockIdEditorModel model,
+      boolean suppressErrors
+  ) {
+    return new UltsBlockIdListEntry(
+        Component.translatable(KEY + "multi_block_containers"),
+        model,
+        entries.getResetButtonKey(),
+        suppressErrors);
+  }
+
+  private static void save(UltsBlockIdEditorModel multiBlock, UltsConfigData data) {
+    List<String> invalid = multiBlock.invalid();
+    if (!invalid.isEmpty()) {
+      UltsMod.LOGGER.error(
+          "UltStorage configuration not saved, unknown block ids: {}", invalid);
+      SystemToast.add(
+          Minecraft.getInstance().gui.toastManager(),
+          SAVE_RESULT,
+          Component.translatable(KEY + "save_failed"),
+          Component.literal(String.join(", ", invalid))
+      );
+      return;
+    }
     boolean success = UltsConfigManager.getInstance().savePending(data);
     if (!success) {
       UltsMod.LOGGER.error("Failed to save Ults client configuration");

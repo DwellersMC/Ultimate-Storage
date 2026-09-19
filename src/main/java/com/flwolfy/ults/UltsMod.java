@@ -36,8 +36,15 @@ public final class UltsMod implements ModInitializer {
         active.tick();
       }
     });
-    // The inputs are only an organisational construct: breaking any of their blocks tears the input
-    // down and tells everyone about it.
+    // A bound container is protected: it can only be broken while sneaking, and breaking it then
+    // removes exactly that binding and tells everyone about it.
+    PlayerBlockBreakEvents.BEFORE.register((level, player, pos, state, entity) -> {
+      UltsRuntime active = runtime;
+      if (active == null || level.isClientSide()) {
+        return true;
+      }
+      return active.allowBreak(player, level, pos);
+    });
     PlayerBlockBreakEvents.AFTER.register((level, player, pos, state, entity) -> {
       UltsRuntime active = runtime;
       if (active != null && !level.isClientSide()) {

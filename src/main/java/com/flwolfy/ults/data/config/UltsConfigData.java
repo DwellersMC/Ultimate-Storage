@@ -1,6 +1,7 @@
 package com.flwolfy.ults.data.config;
 
 import com.flwolfy.ults.data.lang.UltsLangManager;
+import net.minecraft.resources.Identifier;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -18,15 +19,15 @@ public record UltsConfigData(General general, Input input) {
   ) {}
 
   public record Input(
-      int bindPermissionLevel,
-      int deletePermissionLevel,
+      int permissionLevel,
       int maxBindings,
-      int drainInterval
+      int drainInterval,
+      List<String> multiBlockContainers
   ) {}
 
   public static final UltsConfigData DEFAULT = new UltsConfigData(
       new General("en_us", UltsItemVisibility.STOCKED_COMPACT, UltsStorageMode.VOID),
-      new Input(2, 2, 0, 2)
+      new Input(2, 0, 2, List.of())
   );
 
   public List<String> validate() {
@@ -42,11 +43,8 @@ public record UltsConfigData(General general, Input input) {
     if (general == null || general.storageMode() == null) {
       invalid.add("general.storageMode");
     }
-    if (input == null || input.bindPermissionLevel() < 0 || input.bindPermissionLevel() > 4) {
-      invalid.add("input.bindPermissionLevel");
-    }
-    if (input == null || input.deletePermissionLevel() < 0 || input.deletePermissionLevel() > 4) {
-      invalid.add("input.deletePermissionLevel");
+    if (input == null || input.permissionLevel() < 0 || input.permissionLevel() > 4) {
+      invalid.add("input.permissionLevel");
     }
     if (input == null || input.maxBindings() < 0) {
       invalid.add("input.maxBindings");
@@ -54,6 +52,11 @@ public record UltsConfigData(General general, Input input) {
     if (input == null || input.drainInterval() < MIN_DRAIN_INTERVAL
         || input.drainInterval() > MAX_DRAIN_INTERVAL) {
       invalid.add("input.drainInterval");
+    }
+    if (input == null || input.multiBlockContainers() == null
+        || input.multiBlockContainers().stream().anyMatch(
+            value -> value == null || Identifier.tryParse(value) == null)) {
+      invalid.add("input.multiBlockContainers");
     }
     return List.copyOf(invalid);
   }
@@ -66,10 +69,13 @@ public record UltsConfigData(General general, Input input) {
             general.storageMode()
         ),
         new Input(
-            input.bindPermissionLevel(),
-            input.deletePermissionLevel(),
+            input.permissionLevel(),
             input.maxBindings(),
-            input.drainInterval()
+            input.drainInterval(),
+            input.multiBlockContainers().stream()
+                .map(value -> value.trim().toLowerCase(Locale.ROOT))
+                .distinct()
+                .toList()
         )
     );
   }

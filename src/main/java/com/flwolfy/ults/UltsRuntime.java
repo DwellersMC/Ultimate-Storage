@@ -12,15 +12,22 @@ import com.flwolfy.ults.display.UltsCreativeCatalog;
 import com.flwolfy.ults.display.UltsStorageSGUI;
 import com.flwolfy.ults.display.UltsSurvivalItems;
 import com.flwolfy.ults.display.UltsWithdrawSGUI;
+import com.flwolfy.ults.input.UltsContainers;
 import com.flwolfy.ults.input.UltsInputManager;
 import com.flwolfy.ults.util.UltsTextBuilder;
 import com.flwolfy.ults.visual.UltsHighlights;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.BlockHitResult;
@@ -43,10 +50,15 @@ public final class UltsRuntime {
   /** How far a player may look to inspect or delete a binding. */
   private static final double LOOK_REACH = 6.0D;
 
+  /** How long the "sneak to break it" notice stays quiet after being shown once, in ticks. */
+  private static final int PROTECTED_NOTICE_TICKS = 40;
+
   private final MinecraftServer server;
   private final UltsState state;
   private final UltsInputManager inputs;
   private final UltsHighlights highlights = new UltsHighlights();
+  /** Per player tick of the last break-protection notice, so it cannot flood the chat. */
+  private final Map<UUID, Long> protectedNotices = new HashMap<>();
   private final UltsRemoteStorage.Snapshot[] remoteShards =
       new UltsRemoteStorage.Snapshot[REMOTE_SHARDS];
   private UltsRemoteStorage.Snapshot merged;
@@ -207,6 +219,46 @@ public final class UltsRuntime {
     }
   }
 
+  /**
+   * Whether a player may break this block. The whole bound container is protected, both halves of a
+   * large one included, and only a sneaking player can take it down.
+   */
+  public boolean allowBreak(Player player, Level level, BlockPos position) {
+    if (player == null || !(level instanceof ServerLevel serverLevel)
+        || player.isShiftKeyDown()) {
+      return true;
+    }
+    if (!bound(serverLevel, position)) {
+      return true;
+    }
+    if (player instanceof ServerPlayer serverPlayer) {
+      // Tell the client to drop its predicted break, then explain why nothing happened. The notice
+      // goes to the chat and not to the action bar, where the look-at binding hint would overwrite
+      // it within a few ticks.
+      serverPlayer.connection.send(new ClientboundBlockUpdatePacket(
+          position, serverLevel.getBlockState(position)));
+      long tick = server.getTickCount();
+      Long last = protectedNotices.get(serverPlayer.getUUID());
+      if (last == null || tick - last >= PROTECTED_NOTICE_TICKS) {
+        protectedNotices.put(serverPlayer.getUUID(), tick);
+        serverPlayer.sendSystemMessage(UltsTextBuilder.info(
+            UltsLangManager.getInstance().text("ults.input.protected")));
+      }
+    }
+    return false;
+  }
+
+  /** True when this position, or the other half of its large container, is bound. */
+  private boolean bound(ServerLevel level, BlockPos position) {
+    String dimension = level.dimension().identifier().toString();
+    for (BlockPos part : UltsContainers.parts(level, position)) {
+      if (state.binding(dimension, part) != null) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private void announce(UltsBinding binding, int index) {
     invalidateRemote();
     Component message = UltsTextBuilder.info(UltsTextBuilder.format(
@@ -222,6 +274,10 @@ public final class UltsRuntime {
   }
 
   void tick() {
+    if (server.getTickCount() % 600 == 0) {
+      long now = server.getTickCount();
+      protectedNotices.entrySet().removeIf(entry -> now - entry.getValue() > 600);
+    }
     for (UltsBinding binding : inputs.tick(!remote())) {
       int index = state.number(binding);
       if (index > 0 && !state.removeBindings(index, index).isEmpty()) {
@@ -264,13 +320,30 @@ public final class UltsRuntime {
           || hit.getType() != HitResult.Type.BLOCK) {
         continue;
       }
-      UltsBinding binding = state.binding(
-          player.level().dimension().identifier().toString(), hit.getBlockPos());
+      UltsBinding binding = bindingAt(player.level(), hit.getBlockPos());
       if (binding == null) {
         continue;
       }
       player.sendSystemMessage(lookedAt(binding, state.number(binding)), true);
     }
+  }
+
+  /**
+   * The binding of the container a position belongs to, whatever part of a large container it is.
+   * Looking at any part of a bound multi block container therefore shows the same binding.
+   */
+  public UltsBinding bindingAt(Level level, BlockPos position) {
+    if (!(level instanceof ServerLevel serverLevel)) {
+      return null;
+    }
+    String dimension = level.dimension().identifier().toString();
+    for (BlockPos part : UltsContainers.parts(serverLevel, position)) {
+      UltsBinding binding = state.binding(dimension, part);
+      if (binding != null) {
+        return binding;
+      }
+    }
+    return null;
   }
 
   private static Component lookedAt(UltsBinding binding, int number) {

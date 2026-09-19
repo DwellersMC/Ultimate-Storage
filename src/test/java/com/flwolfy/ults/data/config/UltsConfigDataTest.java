@@ -8,12 +8,11 @@ import org.junit.jupiter.api.Test;
 class UltsConfigDataTest {
 
   @Test
-  void defaultsSpreadTheDrainWorkOverTwoTicks() {
-    // The game behaviour stays as before unless the server owner changes this on purpose.
+  void defaultsKeepTheBehaviourTheServerHadBefore() {
     assertEquals(2, UltsConfigData.DEFAULT.input().drainInterval());
     assertEquals(0, UltsConfigData.DEFAULT.input().maxBindings());
-    assertEquals(2, UltsConfigData.DEFAULT.input().bindPermissionLevel());
-    assertEquals(2, UltsConfigData.DEFAULT.input().deletePermissionLevel());
+    // One permission level covers binding, deleting, the highlight and reloading.
+    assertEquals(2, UltsConfigData.DEFAULT.input().permissionLevel());
   }
 
   @Test
@@ -28,10 +27,19 @@ class UltsConfigDataTest {
   }
 
   @Test
-  void canonicalizeKeepsTheDrainInterval() {
+  void canonicalizeKeepsTheDrainIntervalAndPermission() {
     UltsConfigData data = new UltsConfigData(
         UltsConfigData.DEFAULT.general(),
-        new UltsConfigData.Input(2, 2, 0, 7));
+        new UltsConfigData.Input(3, 0, 7, java.util.List.of("modid:Big_Chest")));
     assertEquals(7, data.canonicalize().input().drainInterval());
+    assertEquals(3, data.canonicalize().input().permissionLevel());
+    // Listed block ids are normalised and duplicates are dropped.
+    assertEquals(java.util.List.of("modid:big_chest"),
+        data.canonicalize().input().multiBlockContainers());
+  }
+
+  @Test
+  void multiBlockContainerListStartsEmpty() {
+    assertEquals(java.util.List.of(), UltsConfigData.DEFAULT.input().multiBlockContainers());
   }
 }

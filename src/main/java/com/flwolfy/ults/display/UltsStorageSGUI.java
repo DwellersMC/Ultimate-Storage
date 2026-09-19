@@ -11,10 +11,15 @@ import eu.pb4.sgui.api.elements.GuiElementBuilder;
 import eu.pb4.sgui.api.gui.SimpleGui;
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import net.minecraft.ChatFormatting;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.inventory.MenuType;
@@ -173,16 +178,85 @@ public final class UltsStorageSGUI extends SimpleGui {
         .toList();
   }
 
-  /** Whether a catalogued item is listed in this mode, whatever its stock is. */
+  /**
+   * Whether a catalogued entry is listed in this mode, whatever its stock is.
+   *
+   * <p>Survival shows an item through its base form only: when the catalog holds the item without any
+   * component, that is the one row (a painting with a certain picture is not an item, the painting
+   * is). An item that only exists as variants is listed through those variants, and which of them
+   * survival can really produce is decided per type afterwards.
+   */
   private static boolean listed(UltsItemVisibility visibility, ItemStack template, long amount) {
     if (amount > 0) {
       return true;
     }
     return switch (visibility) {
       case ALL -> true;
-      case SURVIVAL -> UltsSurvivalItems.obtainable(template);
+      case SURVIVAL -> base(template);
       case STOCKED_COMPACT -> false;
     };
+  }
+
+  /** Whether this entry may represent its item in the survival view. */
+  private static boolean base(ItemStack template) {
+    if (!UltsSurvivalItems.obtainable(template)) {
+      return false;
+    }
+    if (UltsCreativeCatalog.plainTemplate(template.getItem()) != null) {
+      // The item has a base form, so a variant may never be used instead of it.
+      return plain(template);
+    }
+    return true;
+  }
+
+  /** A plain item: the item itself, without any component that would make it one specific variant. */
+  private static boolean plain(ItemStack template) {
+    return template.getComponentsPatch().isEmpty();
+  }
+
+  /**
+   * Keeps one row per item that has a base form, and one row per type of an item that only exists as
+   * variants: every brewable potion, every enchantment a book can carry. A variant belongs to a type
+   * only when the data knows the values of that type, and then only the values survival can produce
+   * are shown (a painting picture, the uncraftable potion). For a type the data knows nothing about
+   * no variant can be ruled out, so all of them are shown. Anything that is really stored keeps its
+   * own row.
+   */
+  private static List<UltsStoredView> onePerItem(List<UltsStoredView> views) {
+    Set<UltsStoredView> chosen = Collections.newSetFromMap(new IdentityHashMap<>());
+    Map<Item, UltsStoredView> baseRows = new IdentityHashMap<>();
+    Set<String> usedTypes = new HashSet<>();
+    for (UltsStoredView view : views) {
+      if (view.amount() > 0) {
+        continue;
+      }
+      ItemStack template = view.template();
+      Item item = template.getItem();
+      if (UltsCreativeCatalog.plainTemplate(item) != null) {
+        if (plain(template)) {
+          baseRows.putIfAbsent(item, view);
+        }
+        continue;
+      }
+      String type = UltsSurvivalItems.typeKey(template);
+      if (type == null) {
+        chosen.add(view);
+        continue;
+      }
+      // A type belongs to one item: a potion and a tipped arrow of the same potion are two rows.
+      if (UltsSurvivalItems.typeObtainable(template)
+          && usedTypes.add(BuiltInRegistries.ITEM.getKey(item) + "|" + type)) {
+        chosen.add(view);
+      }
+    }
+    chosen.addAll(baseRows.values());
+    List<UltsStoredView> result = new ArrayList<>(views.size());
+    for (UltsStoredView view : views) {
+      if (view.amount() > 0 || chosen.contains(view)) {
+        result.add(view);
+      }
+    }
+    return result;
   }
 
   private static long amountOf(Map<Item, List<UltsStoredView>> byItem, ItemStack template) {
@@ -250,6 +324,9 @@ public final class UltsStorageSGUI extends SimpleGui {
       listed = listed.stream()
           .filter(view -> listed(visibility, view.template(), view.amount()))
           .toList();
+      if (visibility == UltsItemVisibility.SURVIVAL) {
+        listed = onePerItem(listed);
+      }
     }
     if (!filter.isEmpty()) {
       listed = listed.stream()

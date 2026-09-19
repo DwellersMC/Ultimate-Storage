@@ -43,13 +43,13 @@ public final class UltsCommand {
     dispatcher.register(Commands.literal("ults")
         .executes(UltsCommand::open)
         .then(Commands.literal("bind")
-            .requires(context -> can(context, true))
+            .requires(UltsCommand::can)
             .executes(context -> bindLookedAt(context, ""))
             .then(Commands.argument("note", StringArgumentType.string())
                 .executes(context -> bindLookedAt(
                     context, StringArgumentType.getString(context, "note")))))
         .then(Commands.literal("bindarea")
-            .requires(context -> can(context, true))
+            .requires(UltsCommand::can)
             .then(Commands.argument("first", BlockPosArgument.blockPos())
                 .then(Commands.argument("second", BlockPosArgument.blockPos())
                     .executes(context -> bindArea(context, ""))
@@ -57,14 +57,16 @@ public final class UltsCommand {
                         .executes(context -> bindArea(
                             context, StringArgumentType.getString(context, "note")))))))
         .then(Commands.literal("delete")
-            .requires(context -> can(context, false))
+            .requires(UltsCommand::can)
             .executes(UltsCommand::deleteLookedAt)
             .then(Commands.argument("selection", StringArgumentType.string())
                 .executes(context -> deleteSelection(
                     context, StringArgumentType.getString(context, "selection")))))
         .then(Commands.literal("show")
+            .requires(UltsCommand::can)
             .executes(context -> highlight(context, true)))
         .then(Commands.literal("hide")
+            .requires(UltsCommand::can)
             .executes(context -> highlight(context, false)))
         .then(Commands.literal("list")
             .executes(context -> list(context, 1))
@@ -72,7 +74,7 @@ public final class UltsCommand {
                 .executes(context -> list(
                     context, IntegerArgumentType.getInteger(context, "page")))))
         .then(Commands.literal("reload")
-            .requires(context -> can(context, true))
+            .requires(UltsCommand::can)
             .executes(UltsCommand::reload)));
   }
 
@@ -266,7 +268,7 @@ public final class UltsCommand {
     int pages = Math.max(1, (bindings.size() + PAGE_SIZE - 1) / PAGE_SIZE);
     int page = Math.max(1, Math.min(requestedPage, pages));
     // Offer the delete click only to sources that are allowed to run it.
-    boolean deletable = can(context.getSource(), false);
+    boolean deletable = can(context.getSource());
     MutableComponent message = header(UltsTextBuilder.format(
         text("ults.command.list.title"), UltsTextBuilder.TEXT, UltsTextBuilder.HIGHLIGHT,
         bindings.size()));
@@ -393,8 +395,8 @@ public final class UltsCommand {
     if (!(hit instanceof BlockHitResult blockHit) || hit.getType() != HitResult.Type.BLOCK) {
       return null;
     }
-    return runtime.state().binding(
-        player.level().dimension().identifier().toString(), blockHit.getBlockPos());
+    // Any part of a large container counts, not only the block that was bound.
+    return runtime.bindingAt(player.level(), blockHit.getBlockPos());
   }
 
   // ====================== //
@@ -440,7 +442,8 @@ public final class UltsCommand {
     return 0;
   }
 
-  private static boolean can(CommandSourceStack source, boolean bind) {
+  /** Binding, deleting, the highlight and reloading all need the one configured permission level. */
+  private static boolean can(CommandSourceStack source) {
     if (source.getEntity() == null) {
       return true;
     }
@@ -448,9 +451,7 @@ public final class UltsCommand {
     if (permissions == PermissionSet.ALL_PERMISSIONS) {
       return true;
     }
-    int required = bind
-        ? UltsConfigManager.getInstance().data().input().bindPermissionLevel()
-        : UltsConfigManager.getInstance().data().input().deletePermissionLevel();
+    int required = UltsConfigManager.getInstance().data().input().permissionLevel();
     return permissions instanceof LevelBasedPermissionSet levels
         && levels.level().isEqualOrHigherThan(PermissionLevel.byId(required));
   }

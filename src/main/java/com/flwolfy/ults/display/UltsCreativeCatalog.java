@@ -28,6 +28,8 @@ public final class UltsCreativeCatalog {
   private static volatile Map<Item, List<ItemStack>> normalItems = Map.of();
   private static volatile List<ItemStack> allTemplates = List.of();
   private static volatile List<UltsItemCategory> categories = List.of();
+  /** The plain form of every item, so the survival view knows when no variant may be used. */
+  private static volatile Map<Item, ItemStack> plainTemplates = Map.of();
 
   private UltsCreativeCatalog() {}
 
@@ -60,6 +62,13 @@ public final class UltsCreativeCatalog {
     normalItems = unionIndex;
     List<ItemStack> ordering = List.copyOf(unionOrdered);
     allTemplates = ordering;
+    Map<Item, ItemStack> plains = new IdentityHashMap<>();
+    for (ItemStack template : ordering) {
+      if (template.getComponentsPatch().isEmpty()) {
+        plains.putIfAbsent(template.getItem(), template);
+      }
+    }
+    plainTemplates = Map.copyOf(plains);
     Map<String, UltsItemCategory> ordered = new LinkedHashMap<>();
     ordered.put(ALL_ID, new UltsItemCategory(
         ALL_ID, Component.empty(), "ults.gui.category.all", new ItemStack(Items.COMPASS),
@@ -83,6 +92,14 @@ public final class UltsCreativeCatalog {
   public static boolean contains(ItemStack stack) {
     return normalItems.getOrDefault(stack.getItem(), List.of()).stream()
         .anyMatch(candidate -> ItemStack.isSameItemSameComponents(candidate, stack));
+  }
+
+  /**
+   * The plain catalogued form of an item, or {@code null} when the catalog only holds variants of it
+   * (potions, enchanted books and the like always carry a component).
+   */
+  public static ItemStack plainTemplate(Item item) {
+    return plainTemplates.get(item);
   }
 
   // Expects a filter already trimmed and lower-cased.
