@@ -184,9 +184,11 @@ public final class UltsStorageSGUI extends SimpleGui {
     if (visibility == UltsItemVisibility.ALL) {
       return categories;
     }
-    // The "everything" overview always stays reachable, whatever the visibility mode hides.
+    // The "everything" overview and the stored data items always stay reachable, whatever the
+    // visibility mode hides; an empty one says so with the paper in the middle of its item area.
     return categories.stream()
         .filter(value -> UltsCreativeCatalog.ALL_ID.equals(value.id())
+            || UltsCreativeCatalog.SPECIAL_ID.equals(value.id())
             || value.templates().stream().anyMatch(
                 template -> listed(visibility, template, amountOf(byItem, template), stock)))
         .toList();
