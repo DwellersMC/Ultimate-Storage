@@ -6,10 +6,6 @@
 
 See the English document [here](./README.md).
 
-> [!WARNING]
-> - *仅支持 Minecraft **26.2**，需要 Fabric Loader **0.19.3+** 与 Java **25**。26.x 的 API 变动意味着更早的版本不再支持。*
-> - *客户端**无需**安装本模组。存储界面、取出界面与容器高亮都使用原版封包，未改动的原版客户端也能进服。Mod Menu 界面是可选的，且只编辑本地文件。*
-
 ---
 
 ## 功能

@@ -6,10 +6,6 @@ Storage belongs to the save, not to a name: a world has **one** storage, its inp
 
 中文文档请看[这里](./README.cn.md)
 
-> [!WARNING]
-> - *Only Minecraft **26.2** is supported, together with Fabric Loader **0.19.3+** and Java **25**. API changes in 26.x mean that older versions are not supported.*
-> - *Clients do **not** need this mod. The storage screen, the withdrawal screen and the container highlight all use vanilla packets, so unmodified vanilla clients can join. The Mod Menu screen is optional and only edits a local file.*
-
 ---
 
 ## Features
