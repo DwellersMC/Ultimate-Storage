@@ -160,7 +160,9 @@ public final class UltsState extends SavedData {
       return;
     }
     int outerCount = source.getCount();
-    if (UltsBoxes.isShulker(source)) {
+    // A box a player named is theirs: it goes in as it is, contents and all, and is never taken apart
+    // or used as packaging material. An unnamed box is opened, so what it holds joins the storage.
+    if (UltsBoxes.isShulker(source) && !UltsBoxes.isNamed(source)) {
       ItemContainerContents contents = source.get(DataComponents.CONTAINER);
       ItemStack emptyBox = source.copyWithCount(1);
       emptyBox.set(DataComponents.CONTAINER, ItemContainerContents.fromItems(List.of()));

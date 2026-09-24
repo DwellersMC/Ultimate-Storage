@@ -31,9 +31,14 @@ public final class UltsBoxes {
     return true;
   }
 
-  /** An empty shulker box that packing may consume: renamed boxes are left to their owner. */
+  /** A shulker box a player gave a name: it is kept as it is, contents and all. */
+  public static boolean isNamed(ItemStack stack) {
+    return stack.has(DataComponents.CUSTOM_NAME);
+  }
+
+  /** An empty shulker box that packing may consume: named boxes are left to their owner. */
   public static boolean isPackable(ItemStack stack) {
-    return isEmptyShulker(stack) && !stack.has(DataComponents.CUSTOM_NAME);
+    return isEmptyShulker(stack) && !isNamed(stack);
   }
 
   public static boolean isPlain(ItemStack stack) {

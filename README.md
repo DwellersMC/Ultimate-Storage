@@ -148,6 +148,12 @@ With `input.crafting` enabled, a withdrawal that runs short is completed by craf
 
 In `REMOTE` mode nothing is drained: the bound containers keep their items, so they work as chests that are reachable from the storage screen. Switching the mode takes effect with `/ults reload`; existing bindings are kept either way.
 
+#### What is stored as it is
+
+- A **named shulker box** goes in as it is, contents and all: the storage never opens it, and it comes back out unchanged. An unnamed box is opened, so what it holds joins the storage and only the empty box is kept.
+- A **named empty box is never used as packaging material** for a full-box withdrawal, even though it is empty: boxes for packing are taken from the unnamed plain boxes, crafted if those run out, and from the other colours only after that.
+- Any stack whose components no creative tab entry describes — a **custom name** on anything, stored enchantments, written books and the like — is listed under **Special Data Items**, which is always reachable in the category pager and shows nothing but the paper while it holds nothing.
+
 ---
 
 ### Item Visibility Modes
