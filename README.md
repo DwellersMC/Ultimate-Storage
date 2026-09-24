@@ -44,7 +44,7 @@ Storage belongs to the save, not to a name: a world has **one** storage, its inp
 | `/ults list (page)`                        | List all bindings as `#N <dimension, (x, y, z)> note`; the lines are clickable while allowed |
 | `/ults show`                               | Show the highlight of nearby bound containers to you                                        |
 | `/ults hide`                               | Hide your highlight again                                                                   |
-| `/ults reload`                             | Reload `config/ults.json`                                                                   |
+| `/ults reload`                             | Reload `config/ults.json` and read the server data (recipes, creative tabs, survival catalogue) again |
 
 `/ults` and `/ults list` are open to everyone. Binding a container, binding an area, deleting bindings, the highlight and reloading need the **management permission level** (`input.permissionLevel`, vanilla level `0`-`4`, default `2`); the server console is always allowed. `/ults list` only offers the click-to-delete action to players that may delete.
 
@@ -131,7 +131,7 @@ With `input.crafting` enabled, a withdrawal that runs short is completed by craf
 - Recipes whose result or ingredients the game decides while it runs (dyeing, fireworks, banner and map copying, repairing, and the like) are not used.
 - The empty boxes of a full-box withdrawal are taken in the order **plain boxes in storage, then boxes crafted for the request, and only then the other colours**: a box that can be crafted is never passed over in favour of a coloured one, and when not all of them can be crafted, the colours cover what is left. The screen says how many stored boxes are used and how many are crafted before the confirm button is pressed.
 - The withdrawal screen lists what will be crafted before the confirm button is pressed.
-- `/ults reload` reads the recipes again, which is needed after a data pack changed them.
+- `/ults reload` reads the server data again: the recipes used for automatic crafting, the creative tabs and the survival catalogue. Run it after a data pack changed recipes, loot tables or trades, so a new acquisition path counts as survival obtainable without restarting the server.
 
 ---
 
@@ -164,7 +164,7 @@ The configured mode is the **default**, not a fixed setting: every player can sw
 
 #### How the survival catalogue is derived
 
-Minecraft has no "survival obtainable" flag, so the catalogue is built from everything the server knows when a world loads:
+Minecraft has no "survival obtainable" flag, so the catalogue is built from everything the server knows when a world loads (and again on `/ults reload`):
 
 - the creative tabs a normal player sees, which already cover the acquisition paths that are pure code and appear in no data file (fishing, filling buckets, brushing suspicious blocks, trading, enchanting, …)
 - every recipe result, read both from the recipe manager and from the recipe files, so special recipes such as fireworks, tipped arrows and map copying are included

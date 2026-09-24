@@ -9,7 +9,9 @@ import com.flwolfy.ults.crafting.UltsCraftCatalog;
 import com.flwolfy.ults.data.config.UltsConfigManager;
 import com.flwolfy.ults.data.lang.UltsLangManager;
 import com.flwolfy.ults.data.state.UltsBinding;
+import com.flwolfy.ults.display.UltsCreativeCatalog;
 import com.flwolfy.ults.display.UltsStorageSGUI;
+import com.flwolfy.ults.display.UltsSurvivalItems;
 import com.flwolfy.ults.input.UltsInputManager;
 import com.flwolfy.ults.util.UltsTextBuilder;
 import com.mojang.brigadier.CommandDispatcher;
@@ -25,6 +27,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.resources.Identifier;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.phys.BlockHitResult;
@@ -432,12 +435,18 @@ public final class UltsCommand {
   private static int reload(CommandContext<CommandSourceStack> context) {
     boolean success = UltsConfigManager.getInstance().reload();
     if (success) {
-      // The recipe list is server data, so a reload has to read it again as well.
+      // Recipes, loot tables, trades and creative tabs are all server data, so a reload has to read
+      // them again: a data pack that was changed while the server runs takes effect with this command.
       UltsRuntime runtime = UltsMod.getRuntime();
       if (runtime != null) {
-        UltsCraftCatalog.rebuild(runtime.server());
+        MinecraftServer server = runtime.server();
+        long started = System.nanoTime();
+        UltsCreativeCatalog.rebuild(server);
+        UltsSurvivalItems.rebuild(server);
+        UltsCraftCatalog.rebuild(server);
         UltsMod.LOGGER.info(
-            "UltStorage reloaded; automatic crafting is {}", runtime.craftingMode());
+            "UltStorage reloaded; automatic crafting is {}, catalogs read again in {} ms",
+            runtime.craftingMode(), (System.nanoTime() - started) / 1_000_000L);
       }
       context.getSource().sendSuccess(
           () -> success(text("ults.command.reload.success")), false);
