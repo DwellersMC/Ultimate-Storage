@@ -26,7 +26,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket;
 import net.minecraft.server.MinecraftServer;
@@ -47,6 +46,23 @@ public final class UltsRuntime {
 
   /** How often the "could this be crafted" answers are worked out again while contents keep changing. */
   private static final long CRAFTABLE_REFRESH_TICKS = 20;
+
+  /**
+   * How long one tick may spend working craftable amounts out before the rest waits for the next one.
+   *
+   * <p>A screen asks for a whole page of them at once and every answer can be a search of its own, so
+   * a large pack must not be allowed to spend a whole tick's worth on one redraw. Rows that did not
+   * get their turn are answered on the ticks after this one.
+   */
+  private static final long CRAFTABLE_NANOS_PER_TICK = 30_000_000L;
+
+  /**
+   * How many rows one view may leave waiting before a screen settles for the answers it has.
+   *
+   * <p>Redrawing until everything is answered is what keeps a row from being blank for long, but it
+   * has to end even if some row never gets its turn, or a screen would redraw for ever.
+   */
+  private static final int MAX_CRAFTABLE_WAITS = 200;
 
   /** How many slices the remote aggregate is computed in. */
   private static final int REMOTE_SHARDS = 8;
@@ -80,17 +96,23 @@ public final class UltsRuntime {
   private long shardTick = -1;
   private long remoteDemandTick = Long.MIN_VALUE / 2;
   private long remoteRevision;
-  /** Craftable amounts of the last render, dropped as soon as contents or mode change. */
-  private final Map<String, Long> craftableCache = new HashMap<>();
-  /** The contents those answers were worked out on, so a row never plans against a stale pile. */
-  private UltsCraftPool craftablePool = new UltsCraftPool(4);
+  /** The view of the last contents, dropped as soon as contents or mode change. */
+  private UltsCraftResolver craftableView;
+  private UltsCraftResolver craftableLooseView;
+  /** The pile the current views were built from, needed to build the station-less one later. */
+  private UltsCraftPool craftableViewPool = new UltsCraftPool(4);
   private long craftableTick = Long.MIN_VALUE;
-  private long craftableRevision = -1L;
   /** The contents the last summary was taken from, and the summary itself. */
   private List<UltsStoredView> lastStock;
   private long lastStockFingerprint;
   private UltsCraftingMode craftableMode;
   private long craftableFingerprint;
+  /** The tick this budget belongs to, how long it lasts, and whether anything is still waiting. */
+  private long craftableBudgetTick = Long.MIN_VALUE;
+  private long craftableDeadline = Long.MAX_VALUE;
+  private boolean craftableDeferred;
+  /** How many rows the current view has already left waiting. */
+  private int craftableWaits;
 
   UltsRuntime(MinecraftServer server) {
     this.server = server;
@@ -174,10 +196,15 @@ public final class UltsRuntime {
   /**
    * How many more of an item a given stock could craft right now.
    *
-   * <p>A screen asks this once per item row, so the answer is remembered for the contents it was
+   * <p>A screen asks this once per item row, so the answers are remembered for the contents they were
    * computed from: while nobody stores or sets anything, browsing a large storage costs one lookup per
-   * item instead of one per redraw. The revision, the mode and a cheap fingerprint of the contents are
-   * all part of that memory key, so an answer can never be reused for other contents.
+   * item instead of one search per redraw. A summary of the contents is what that memory hangs on, so
+   * an answer can never be reused for other contents.
+   *
+   * <p>One answer can cost more than a tick should spare on a large pack, so a tick only ever spends
+   * so long on these and the remaining rows are answered on the ticks after it. {@link
+   * #craftablePending()} says whether anything is still waiting, which is what makes a screen redraw
+   * until every row has its answer.
    *
    * @param template the item in question
    * @param stock contents to craft from, so a screen can reuse the list it already read
@@ -201,30 +228,106 @@ public final class UltsRuntime {
     return craftable(template, stock, false);
   }
 
-  private long craftable(ItemStack template, List<UltsStoredView> stock, boolean requireStation) {
-    long revision = contentRevision();
-    UltsCraftingMode mode = craftingMode();
-    long fingerprint = fingerprintOf(stock);
-    if (revision != craftableRevision || mode != craftableMode
-        || fingerprint != craftableFingerprint) {
-      long tick = server.getTickCount();
-      // A screen asks this per item, so a storage that changes every tick would otherwise work the
-      // whole catalog out every tick. The answers are allowed to be a moment old: a withdrawal is
-      // always planned again on the live contents.
-      if (craftableTick == Long.MIN_VALUE || tick - craftableTick >= CRAFTABLE_REFRESH_TICKS) {
-        craftableCache.clear();
-        craftablePool = UltsCraftPool.of(stock);
-        craftableRevision = revision;
-        craftableMode = mode;
-        craftableFingerprint = fingerprint;
-        craftableTick = tick;
-      }
+  /**
+   * Whether the storage could hand this item over right now, crafting included.
+   *
+   * <p>A listing asks this about every row it might show, so it is answered from the view of the pile
+   * instead of by searching for each row.
+   *
+   * @param template the item in question
+   * @param stock contents to craft from
+   * @return whether at least one could be made right now
+   */
+  public boolean craftableNow(ItemStack template, List<UltsStoredView> stock) {
+    UltsCraftResolver view = view(stock, true);
+    if (view == null) {
+      return false;
     }
-    String key = (requireStation ? "" : "station|")
-        + BuiltInRegistries.ITEM.getKey(template.getItem()) + "|"
-        + template.getComponentsPatch();
-    return craftableCache.computeIfAbsent(key, ignored -> UltsCraftResolver.capacity(
-        template, craftablePool, mode, requireStation));
+    // A listing asks this about every row it might show, so it runs under the same tick budget the
+    // amounts do: whatever is left over is worked out on a later tick.
+    boolean value = view.craftable(template, budget());
+    if (view.ranOut()) {
+      defer();
+    }
+    return value;
+  }
+
+  /** Notes that an answer is still owed, so a screen showing them may redraw on a later tick. */
+  private void defer() {
+    craftableWaits++;
+    craftableDeferred = craftableWaits < MAX_CRAFTABLE_WAITS;
+  }
+
+  /** Whether an answer had to wait for a later tick, so a screen showing them may redraw. */
+  public boolean craftablePending() {
+    return craftableDeferred;
+  }
+
+  private long craftable(ItemStack template, List<UltsStoredView> stock, boolean requireStation) {
+    UltsCraftResolver view = view(stock, requireStation);
+    if (view == null) {
+      return 0L;
+    }
+    long value = view.capacity(template, budget());
+    if (value == UltsCraftResolver.UNKNOWN) {
+      // Out of this tick's time: the row keeps no answer yet and the screen asks again next tick,
+      // until it has asked often enough that settling for what it has beats asking again.
+      defer();
+      return 0L;
+    }
+    return value;
+  }
+
+  /** How long this tick may still spend on craftable amounts; every tick starts over. */
+  private long budget() {
+    long tick = server.getTickCount();
+    if (tick != craftableBudgetTick) {
+      craftableBudgetTick = tick;
+      craftableDeadline = System.nanoTime() + CRAFTABLE_NANOS_PER_TICK;
+      craftableDeferred = false;
+    }
+    return craftableDeadline;
+  }
+
+  /**
+   * The view of a pile, remembered for the contents it was built from.
+   *
+   * <p>A storage that changes every tick would otherwise have the whole catalogue worked out every
+   * tick, so an answer is allowed to be a moment old and the view is only rebuilt once the contents
+   * have settled. A withdrawal always plans again on the live contents, so an answer that is a moment
+   * old can never be acted on.
+   */
+  private @Nullable UltsCraftResolver view(List<UltsStoredView> stock, boolean requireStation) {
+    UltsCraftingMode mode = craftingMode();
+    if (!mode.enabled()) {
+      return null;
+    }
+    long fingerprint = fingerprintOf(stock);
+    if (fingerprint != craftableFingerprint || mode != craftableMode) {
+      long tick = server.getTickCount();
+      if (craftableTick != Long.MIN_VALUE && tick - craftableTick < CRAFTABLE_REFRESH_TICKS) {
+        // The contents moved again before they settled, so the answers of a moment ago still stand.
+        return requireStation ? craftableView : looseView();
+      }
+      UltsCraftPool pool = UltsCraftPool.of(stock);
+      craftableViewPool = pool;
+      craftableView = UltsCraftResolver.of(pool, mode, true);
+      // The station-less view is only ever needed to explain a missing station, so it waits.
+      craftableLooseView = null;
+      craftableFingerprint = fingerprint;
+      craftableMode = mode;
+      craftableTick = tick;
+      craftableWaits = 0;
+    }
+    return requireStation ? craftableView : looseView();
+  }
+
+  /** The view that pretends a station were stored, built the first time a row really needs it. */
+  private UltsCraftResolver looseView() {
+    if (craftableLooseView == null) {
+      craftableLooseView = UltsCraftResolver.of(craftableViewPool, craftableMode, false);
+    }
+    return craftableLooseView;
   }
 
   /** A cheap summary of contents, so a cached answer can never be handed out for other contents. */

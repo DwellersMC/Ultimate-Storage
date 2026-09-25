@@ -85,7 +85,7 @@ public final class UltsStorageSGUI extends SimpleGui {
           return true;
         }
         if (gui.runtime == runtime
-            && gui.renderedRevision != runtime.contentRevision()) {
+            && (gui.renderedRevision != runtime.contentRevision() || runtime.craftablePending())) {
           gui.render();
         }
         return false;
@@ -215,8 +215,9 @@ public final class UltsStorageSGUI extends SimpleGui {
       case ALL -> true;
       case SURVIVAL -> base(template);
       // Everything the storage can hand over right now: an item that can be crafted at this moment
-      // counts as well, which needs the crafting mode to be on and a station to be stored.
-      case AVAILABLE -> runtime.craftable(template, stock) > 0;
+      // counts as well, which needs the crafting mode to be on and a station to be stored. This is
+      // asked about every row of every category, so it is answered from the view of the pile.
+      case AVAILABLE -> runtime.craftableNow(template, stock);
     };
   }
 
@@ -400,8 +401,9 @@ public final class UltsStorageSGUI extends SimpleGui {
           true));
     }
     // A row opens the withdrawal screen while the storage holds the item or could craft it, so an
-    // item that is not stored but can be made right now is just as usable.
-    if (amount > 0 || craftable > 0) {
+    // item that is not stored but can be made right now is just as usable. The view answers this even
+    // while the exact amount is still being worked out for a later tick.
+    if (amount > 0 || craftable > 0 || runtime.craftableNow(template, stock)) {
       builder
           .addLoreLine(UltsGuiText.text("ults.gui.open_withdraw").copy()
               .withStyle(ChatFormatting.GRAY))

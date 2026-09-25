@@ -27,15 +27,24 @@ import net.minecraft.world.item.crafting.display.SlotDisplayContext;
  * <p>Only crafting table and stonecutter recipes with a plain ingredient list take part. Recipes that
  * decide their ingredients or their result while the game runs (dyeing, fireworks, banner and map
  * copying, repairing, and the like) have no ingredient list to consume, so they are left out.
+ *
+ * <p>Everything the catalogue hands out is remembered until the recipes are read again: a screen asks
+ * the same questions about the same items over and over, and answering them by walking the whole
+ * catalogue every time is what a large pack cannot afford.
  */
 public final class UltsCraftCatalog {
 
   private static volatile Map<Item, List<UltsCraftRecipe>> byResult = Map.of();
   /** One entry per distinct stack some recipe produces, the items a recipe slot may be filled with. */
   private static volatile List<ItemStack> producible = List.of();
+  /** The producible stacks of one item, so a slot only looks at the items it actually names. */
+  private static volatile Map<Item, List<ItemStack>> producibleByItem = Map.of();
+  /** Every catalogued recipe, which is what a reachability pass walks. */
+  private static volatile List<UltsCraftRecipe> everything = List.of();
   /** Which of those stacks one ingredient accepts; asked again and again while a plan is worked out. */
   private static final Map<Ingredient, List<ItemStack>> CANDIDATES = new ConcurrentHashMap<>();
-  private static volatile long recipeCount;
+  /** The recipes that produce exactly one stack, asked once per stack while a pile is searched. */
+  private static final Map<String, List<UltsCraftRecipe>> RESULT_RECIPES = new ConcurrentHashMap<>();
 
   private UltsCraftCatalog() {}
 
@@ -77,10 +86,12 @@ public final class UltsCraftCatalog {
     Comparator<UltsCraftRecipe> order = Comparator
         .comparingInt(UltsCraftRecipe::outputCount).reversed()
         .thenComparing(UltsCraftRecipe::id);
+    List<UltsCraftRecipe> all = new ArrayList<>((int) found);
     index.forEach((item, recipes) -> {
       List<UltsCraftRecipe> sorted = new ArrayList<>(recipes);
       sorted.sort(order);
       frozen.put(item, List.copyOf(sorted));
+      all.addAll(sorted);
     });
     Map<String, ItemStack> results = new LinkedHashMap<>();
     for (List<UltsCraftRecipe> recipes : frozen.values()) {
@@ -90,10 +101,20 @@ public final class UltsCraftCatalog {
     }
     List<ItemStack> producibleStacks = new ArrayList<>(results.values());
     producibleStacks.sort(Comparator.comparing(UltsCraftCatalog::key));
+    Map<Item, List<ItemStack>> byItem = new HashMap<>();
+    for (ItemStack stack : producibleStacks) {
+      byItem.computeIfAbsent(stack.getItem(), key -> new ArrayList<>()).add(stack);
+    }
+    Map<Item, List<ItemStack>> frozenByItem = new HashMap<>();
+    byItem.forEach((item, stacks) -> frozenByItem.put(item, List.copyOf(stacks)));
+
     byResult = Map.copyOf(frozen);
     producible = List.copyOf(producibleStacks);
+    producibleByItem = Map.copyOf(frozenByItem);
+    everything = List.copyOf(all);
     CANDIDATES.clear();
-    recipeCount = found;
+    RESULT_RECIPES.clear();
+    UltsIngredients.clear();
     UltsMod.LOGGER.info(
         "UltStorage crafting catalog: {} recipe(s) for {} item(s)", found, frozen.size());
   }
@@ -103,32 +124,43 @@ public final class UltsCraftCatalog {
     if (template.isEmpty()) {
       return List.of();
     }
-    List<UltsCraftRecipe> matching = new ArrayList<>();
-    for (UltsCraftRecipe recipe : byResult.getOrDefault(template.getItem(), List.of())) {
-      if (ItemStack.isSameItemSameComponents(recipe.result(), template)) {
-        matching.add(recipe);
+    return RESULT_RECIPES.computeIfAbsent(key(template), wanted -> {
+      List<UltsCraftRecipe> matching = new ArrayList<>();
+      for (UltsCraftRecipe recipe : byResult.getOrDefault(template.getItem(), List.of())) {
+        if (ItemStack.isSameItemSameComponents(recipe.result(), template)) {
+          matching.add(recipe);
+        }
       }
-    }
-    return matching;
+      return List.copyOf(matching);
+    });
+  }
+
+  /** Every catalogued recipe, for a pass that has to look at the whole graph at once. */
+  public static List<UltsCraftRecipe> everything() {
+    return everything;
   }
 
   /**
    * The stacks a recipe slot could be filled with.
    *
    * <p>Only what some recipe produces is worth reporting, because anything else can never be crafted
-   * when the storage does not hold it anyway.
+   * when the storage does not hold it anyway. A slot names its items, so only the producible stacks
+   * of those items have to be looked at.
    *
    * @param ingredient the recipe slot
    * @return the matching stacks, in a stable order
    */
   public static List<ItemStack> candidates(Ingredient ingredient) {
-    return CANDIDATES.computeIfAbsent(ingredient, key -> {
+    return CANDIDATES.computeIfAbsent(ingredient, slot -> {
       List<ItemStack> matching = new ArrayList<>();
-      for (ItemStack stack : producible) {
-        if (key.test(stack)) {
-          matching.add(stack);
+      for (Item item : UltsIngredients.accepted(slot)) {
+        for (ItemStack stack : producibleByItem.getOrDefault(item, List.of())) {
+          if (slot.test(stack)) {
+            matching.add(stack);
+          }
         }
       }
+      matching.sort(Comparator.comparing(UltsCraftCatalog::key));
       return List.copyOf(matching);
     });
   }
