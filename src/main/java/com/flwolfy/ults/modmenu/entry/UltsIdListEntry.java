@@ -1,8 +1,7 @@
 package com.flwolfy.ults.modmenu.entry;
 
 import com.flwolfy.ults.UltsMod;
-import com.flwolfy.ults.data.config.UltsConfigData;
-import com.flwolfy.ults.modmenu.model.UltsBlockIdEditorModel;
+import com.flwolfy.ults.modmenu.model.UltsIdEditorModel;
 import java.util.List;
 import java.util.Optional;
 import me.shedaniel.clothconfig2.gui.entries.AbstractTextFieldListListEntry;
@@ -16,24 +15,28 @@ import net.minecraft.network.chat.Component;
 import org.jetbrains.annotations.Nullable;
 
 /**
- * Block id list whose initial and dynamically added rows use the same custom cell type.
+ * List of ids whose initial and dynamically added rows use the same custom cell type.
  *
  * <p>The list keeps its own row geometry for hit tests and it maintains the focus chain of the row
  * that is being edited, because Cloth only hands the keyboard to a text list cell through a selection
  * flag that does not reach the copy of the list shown inside a section.
+ *
+ * <p>Which game object an id has to name is the caller's business: the rows ask the model, so the same
+ * widget serves the block ids of multi block containers and the item ids of the special item filter.
  */
-public final class UltsBlockIdListEntry extends AbstractTextFieldListListEntry<
+public final class UltsIdListEntry extends AbstractTextFieldListListEntry<
     String,
-    UltsBlockIdCell,
-    UltsBlockIdListEntry
+    UltsIdCell,
+    UltsIdListEntry
 > {
 
-  private static final String KEY = "ults.config.multi_block_containers";
   /** Height of the row that carries the label and the add and delete buttons. */
   private static final int HEADER_HEIGHT = 24;
   private static final int ROW_INDENT = 14;
 
-  private final UltsBlockIdEditorModel model;
+  /** Language key whose {@code .tooltip}, {@code .hint} and {@code .invalid} the rows use. */
+  private final String key;
+  private final UltsIdEditorModel model;
   private final boolean suppressErrors;
   private List<String> observedValues;
   private int renderX;
@@ -43,16 +46,18 @@ public final class UltsBlockIdListEntry extends AbstractTextFieldListListEntry<
   private boolean renderKnown;
 
   /**
-   * Creates an independently rendered block id list.
+   * Creates an independently rendered id list.
    *
    * @param title localized list title
-   * @param model shared block id model
+   * @param key language key the tooltip, the row hint and the invalid notice hang off
+   * @param model shared id model
    * @param resetButtonKey Cloth Config reset button text
    * @param suppressErrors whether this All-category copy suppresses aggregate errors
    */
-  public UltsBlockIdListEntry(
+  public UltsIdListEntry(
       Component title,
-      UltsBlockIdEditorModel model,
+      String key,
+      UltsIdEditorModel model,
       Component resetButtonKey,
       boolean suppressErrors
   ) {
@@ -60,15 +65,16 @@ public final class UltsBlockIdListEntry extends AbstractTextFieldListListEntry<
         title,
         model.values(),
         true,
-        () -> Optional.of(new Component[]{Component.translatable(KEY + ".tooltip")}),
+        () -> Optional.of(new Component[]{Component.translatable(key + ".tooltip")}),
         model::publish,
-        () -> UltsConfigData.DEFAULT.input().multiBlockContainers(),
+        model::defaults,
         resetButtonKey,
         false,
         true,
         true,
-        UltsBlockIdCell::new
+        UltsIdCell::new
     );
+    this.key = key;
     this.model = model;
     this.suppressErrors = suppressErrors;
     observedValues = model.values();
@@ -76,8 +82,18 @@ public final class UltsBlockIdListEntry extends AbstractTextFieldListListEntry<
   }
 
   @Override
-  public UltsBlockIdListEntry self() {
+  public UltsIdListEntry self() {
     return this;
+  }
+
+  /** Language key the tooltip, the row hint and the invalid notice hang off. */
+  String key() {
+    return key;
+  }
+
+  /** Whether one id names something this game has. */
+  boolean resolvable(String value) {
+    return model.resolvable(value);
   }
 
   @Override
@@ -104,7 +120,7 @@ public final class UltsBlockIdListEntry extends AbstractTextFieldListListEntry<
     if (!isEnabled()) {
       return false;
     }
-    UltsBlockIdCell row = rowAt(event.x(), event.y());
+    UltsIdCell row = rowAt(event.x(), event.y());
     if (row != null) {
       // The row takes its own input focus, which also links the focus chain down to that input.
       row.mouseClicked(event, doubleClick);
@@ -178,7 +194,7 @@ public final class UltsBlockIdListEntry extends AbstractTextFieldListListEntry<
     renderExpanded = isExpanded();
     renderKnown = true;
     publishPendingChanges();
-    for (UltsBlockIdCell cell : cells) {
+    for (UltsIdCell cell : cells) {
       if (!narratables.contains(cell)) {
         narratables.add(cell);
       }
@@ -199,9 +215,9 @@ public final class UltsBlockIdListEntry extends AbstractTextFieldListListEntry<
   }
 
   /**
-   * Receives values published by another independent block id view.
+   * Receives values published by another independent id view.
    *
-   * @param replacement replacement block ids
+   * @param replacement replacement ids
    */
   public void receive(List<String> replacement) {
     if (!List.copyOf(getValue()).equals(observedValues)) {
@@ -217,12 +233,12 @@ public final class UltsBlockIdListEntry extends AbstractTextFieldListListEntry<
    * @param cell rendered cell
    * @return one-based row number
    */
-  int numberOf(UltsBlockIdCell cell) {
+  int numberOf(UltsIdCell cell) {
     return cells.indexOf(cell) + 1;
   }
 
   /** Finds the row that covers one point of the screen, or {@code null} when no row does. */
-  private UltsBlockIdCell rowAt(double mouseX, double mouseY) {
+  private UltsIdCell rowAt(double mouseX, double mouseY) {
     if (!renderKnown || !renderExpanded) {
       return null;
     }
@@ -231,7 +247,7 @@ public final class UltsBlockIdListEntry extends AbstractTextFieldListListEntry<
       return null;
     }
     int rowY = renderY + HEADER_HEIGHT;
-    for (UltsBlockIdCell cell : cells) {
+    for (UltsIdCell cell : cells) {
       int height = cell.getCellHeight();
       if (mouseY >= rowY && mouseY < rowY + height) {
         return cell;
@@ -244,7 +260,7 @@ public final class UltsBlockIdListEntry extends AbstractTextFieldListListEntry<
   /** Adds one empty row, in front of the others when the list is configured that way. */
   private void addRow() {
     setExpanded(true);
-    UltsBlockIdCell cell = getFromValue("");
+    UltsIdCell cell = getFromValue("");
     if (insertInFront()) {
       cells.add(0, cell);
       widgets.add(0, cell);
@@ -260,7 +276,7 @@ public final class UltsBlockIdListEntry extends AbstractTextFieldListListEntry<
   /** Removes the row that currently holds the keyboard. */
   private boolean deleteRow() {
     GuiEventListener focused = getFocused();
-    if (!isExpanded() || !(focused instanceof UltsBlockIdCell cell)) {
+    if (!isExpanded() || !(focused instanceof UltsIdCell cell)) {
       return false;
     }
     cell.onDelete();
@@ -278,19 +294,19 @@ public final class UltsBlockIdListEntry extends AbstractTextFieldListListEntry<
    * <p>Cloth's own key path walks the focus chain, which a row inside a section does not always reach,
    * so the input of the editing row is used as a fallback instead of losing the keystroke.
    */
-  private Optional<UltsBlockIdCell> editingCell() {
-    return cells.stream().filter(UltsBlockIdCell::isEditing).findFirst();
+  private Optional<UltsIdCell> editingCell() {
+    return cells.stream().filter(UltsIdCell::isEditing).findFirst();
   }
 
   private void replaceCells(List<String> replacement) {
     widgets.removeAll(cells);
     narratables.removeAll(cells);
-    for (UltsBlockIdCell cell : cells) {
+    for (UltsIdCell cell : cells) {
       cell.onDelete();
     }
     cells.clear();
     for (String value : replacement) {
-      UltsBlockIdCell cell = getFromValue(value);
+      UltsIdCell cell = getFromValue(value);
       cells.add(cell);
       widgets.add(cell);
       narratables.add(cell);

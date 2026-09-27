@@ -5,11 +5,14 @@ import com.flwolfy.ults.data.config.UltsConfigData;
 import com.flwolfy.ults.data.config.UltsConfigManager;
 import com.flwolfy.ults.data.config.UltsCraftingMode;
 import com.flwolfy.ults.data.config.UltsItemVisibility;
+import com.flwolfy.ults.data.config.UltsSpecialFilter;
 import com.flwolfy.ults.data.config.UltsStorageMode;
 import com.flwolfy.ults.data.lang.UltsLangManager;
-import com.flwolfy.ults.modmenu.entry.UltsBlockIdListEntry;
+import com.flwolfy.ults.modmenu.entry.UltsIdListEntry;
 import com.flwolfy.ults.modmenu.entry.UltsSectionEntry;
-import com.flwolfy.ults.modmenu.model.UltsBlockIdEditorModel;
+import com.flwolfy.ults.modmenu.model.UltsIdEditorModel;
+import com.flwolfy.ults.util.UltsBlockIds;
+import com.flwolfy.ults.util.UltsItemIds;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -42,6 +45,7 @@ public final class UltsConfigScreen {
     ConfigCategory all = builder.getOrCreateCategory(Component.translatable(KEY + "all"));
     ConfigCategory general = builder.getOrCreateCategory(Component.translatable(KEY + "general"));
     ConfigCategory input = builder.getOrCreateCategory(Component.translatable(KEY + "input"));
+    ConfigCategory special = builder.getOrCreateCategory(Component.translatable(KEY + "special"));
 
     all.addEntry(entries.startTextDescription(Component.translatable(KEY + "local_only")
         .withStyle(ChatFormatting.GOLD, ChatFormatting.ITALIC)).build());
@@ -53,12 +57,21 @@ public final class UltsConfigScreen {
     Field<Integer> maxBindings = new Field<>(current.input().maxBindings());
     Field<Integer> drainInterval = new Field<>(current.input().drainInterval());
     Field<UltsCraftingMode> crafting = new Field<>(current.input().crafting());
-    UltsBlockIdEditorModel multiBlock =
-        new UltsBlockIdEditorModel(current.input().multiBlockContainers());
+    Field<Integer> maxSpecial = new Field<>(current.special().maxEntries());
+    Field<Boolean> filterLoot = new Field<>(current.special().filterLootEquipment());
+    Field<UltsSpecialFilter> filterMode = new Field<>(current.special().filterMode());
+    UltsIdEditorModel multiBlock = new UltsIdEditorModel(
+        current.input().multiBlockContainers(),
+        UltsConfigData.DEFAULT.input().multiBlockContainers(),
+        value -> UltsBlockIds.resolve(value).isPresent());
+    UltsIdEditorModel filters = new UltsIdEditorModel(
+        current.special().filters(),
+        UltsConfigData.DEFAULT.special().filters(),
+        value -> UltsItemIds.resolve(value).isPresent());
 
     // Every section is shown twice: once in its own tab and once inside the "all" overview. Scalar
-    // settings share a field, so the copy that was changed away from the loaded value wins; the block
-    // id list shares a model instead, which keeps both copies in step while they are edited.
+    // settings share a field, so the copy that was changed away from the loaded value wins; the id
+    // lists share a model instead, which keeps both copies in step while they are edited.
     List<AbstractConfigListEntry<?>> generalEntries = List.of(
         languageEntry(entries, language),
         itemVisibilityEntry(entries, itemVisibility),
@@ -69,8 +82,15 @@ public final class UltsConfigScreen {
         countEntry(entries, maxBindings, "max_bindings"),
         drainEntry(entries, drainInterval),
         craftingEntry(entries, crafting),
-        multiBlockEntry(entries, multiBlock, false)
+        idListEntry(entries, "multi_block_containers", multiBlock, false)
     );
+    List<AbstractConfigListEntry<?>> specialEntries = List.of(
+        maxSpecialEntry(entries, maxSpecial),
+        filterModeEntry(entries, filterMode),
+        filterLootEntry(entries, filterLoot),
+        idListEntry(entries, "special_filters", filters, false)
+    );
+    // One list entry may only sit in one place, so the overview builds its own copies of everything.
     List<AbstractConfigListEntry<?>> generalOverview = List.of(
         languageEntry(entries, language),
         itemVisibilityEntry(entries, itemVisibility),
@@ -81,17 +101,26 @@ public final class UltsConfigScreen {
         countEntry(entries, maxBindings, "max_bindings"),
         drainEntry(entries, drainInterval),
         craftingEntry(entries, crafting),
-        multiBlockEntry(entries, multiBlock, true)
+        idListEntry(entries, "multi_block_containers", multiBlock, true)
+    );
+    List<AbstractConfigListEntry<?>> specialOverview = List.of(
+        maxSpecialEntry(entries, maxSpecial),
+        filterModeEntry(entries, filterMode),
+        filterLootEntry(entries, filterLoot),
+        idListEntry(entries, "special_filters", filters, true)
     );
 
     generalEntries.forEach(general::addEntry);
     inputEntries.forEach(input::addEntry);
+    specialEntries.forEach(special::addEntry);
     all.addEntry(subCategory(entries, "general", generalOverview));
     all.addEntry(subCategory(entries, "input", inputOverview));
+    all.addEntry(subCategory(entries, "special", specialOverview));
 
     builder.setSavingRunnable(() -> {
       multiBlock.flush();
-      save(multiBlock, new UltsConfigData(
+      filters.flush();
+      save(multiBlock, filters, new UltsConfigData(
           new UltsConfigData.General(
               language.resolve(), itemVisibility.resolve(), storageMode.resolve()),
           new UltsConfigData.Input(
@@ -100,6 +129,12 @@ public final class UltsConfigScreen {
               drainInterval.resolve(),
               multiBlock.values(),
               crafting.resolve()
+          ),
+          new UltsConfigData.Special(
+              maxSpecial.resolve(),
+              filterLoot.resolve(),
+              filterMode.resolve(),
+              filters.values()
           )
       ));
     });
@@ -231,28 +266,83 @@ public final class UltsConfigScreen {
   }
 
   /**
-   * Block ids whose directly connected blocks together form one large container.
+   * How many special entries the storage keeps.
    *
-   * <p>The All-category copy only mirrors the list, so it hides the validation errors the tab copy
-   * already reports.
+   * <p>It is a count, not a page number: the listing turns it into the pages a player sees, and the
+   * tooltip says how many those are.
    */
-  private static AbstractConfigListEntry<?> multiBlockEntry(
+  private static AbstractConfigListEntry<?> maxSpecialEntry(
       ConfigEntryBuilder entries,
-      UltsBlockIdEditorModel model,
+      Field<Integer> field
+  ) {
+    AbstractConfigListEntry<Integer> entry = entries.startIntField(
+            Component.translatable(KEY + "special_max_entries"), field.initial())
+        .setDefaultValue(UltsConfigData.DEFAULT.special().maxEntries())
+        .setMin(0)
+        .setMax(UltsConfigData.MAX_SPECIAL_ENTRIES)
+        .setTooltip(Component.translatable(
+            KEY + "special_max_entries.tooltip",
+            UltsConfigData.SPECIAL_PAGE_SIZE,
+            UltsConfigData.DEFAULT_SPECIAL_PAGES))
+        .build();
+    return field.track(entry);
+  }
+
+  /** What the special filter does to the items it names. */
+  private static AbstractConfigListEntry<?> filterModeEntry(
+      ConfigEntryBuilder entries,
+      Field<UltsSpecialFilter> field
+  ) {
+    AbstractConfigListEntry<UltsSpecialFilter> entry = entries.startEnumSelector(
+            Component.translatable(KEY + "special_filter_mode"),
+            UltsSpecialFilter.class,
+            field.initial())
+        .setDefaultValue(UltsConfigData.DEFAULT.special().filterMode())
+        .setTooltip(Component.translatable(KEY + "special_filter_mode.tooltip"))
+        .setEnumNameProvider(value -> Component.translatable(
+            KEY + "special_filter_mode." + value.name().toLowerCase(Locale.ROOT)))
+        .build();
+    return field.track(entry);
+  }
+
+  /** Whether equipment the loot tables can drop counts as filtered as well. */
+  private static AbstractConfigListEntry<?> filterLootEntry(
+      ConfigEntryBuilder entries,
+      Field<Boolean> field
+  ) {
+    AbstractConfigListEntry<Boolean> entry = entries.startBooleanToggle(
+            Component.translatable(KEY + "special_filter_loot"), field.initial())
+        .setDefaultValue(UltsConfigData.DEFAULT.special().filterLootEquipment())
+        .setTooltip(Component.translatable(KEY + "special_filter_loot.tooltip"))
+        .build();
+    return field.track(entry);
+  }
+
+  /** Item ids the special filter throws away, on top of the equipment the loot tables add. */
+  private static AbstractConfigListEntry<?> idListEntry(
+      ConfigEntryBuilder entries,
+      String key,
+      UltsIdEditorModel model,
       boolean suppressErrors
   ) {
-    return new UltsBlockIdListEntry(
-        Component.translatable(KEY + "multi_block_containers"),
+    return new UltsIdListEntry(
+        Component.translatable(KEY + key),
+        KEY + key,
         model,
         entries.getResetButtonKey(),
         suppressErrors);
   }
 
-  private static void save(UltsBlockIdEditorModel multiBlock, UltsConfigData data) {
-    List<String> invalid = multiBlock.invalid();
+  private static void save(
+      UltsIdEditorModel multiBlock,
+      UltsIdEditorModel filters,
+      UltsConfigData data
+  ) {
+    List<String> invalid = new ArrayList<>(multiBlock.invalid());
+    invalid.addAll(filters.invalid());
     if (!invalid.isEmpty()) {
       UltsMod.LOGGER.error(
-          "UltStorage configuration not saved, unknown block ids: {}", invalid);
+          "UltStorage configuration not saved, unknown ids: {}", invalid);
       SystemToast.add(
           Minecraft.getInstance().gui.toastManager(),
           SAVE_RESULT,

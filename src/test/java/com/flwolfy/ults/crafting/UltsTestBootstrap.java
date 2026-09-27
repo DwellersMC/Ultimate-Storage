@@ -15,13 +15,13 @@ import net.minecraft.world.item.ItemStack;
  * plain stack of a plain item behave the way it does in game: a slot matches it, and its patch is
  * empty, which are the only two things the crafting code looks at.
  */
-final class UltsTestBootstrap {
+public final class UltsTestBootstrap {
 
   private static boolean booted;
 
   private UltsTestBootstrap() {}
 
-  static synchronized void boot() {
+  public static synchronized void boot() {
     if (booted) {
       return;
     }
@@ -35,7 +35,7 @@ final class UltsTestBootstrap {
 
   /** One plain item of this kind, on the very holder the game registers it with. */
   @SuppressWarnings("deprecation")
-  static ItemStack stack(Item item) {
+  public static ItemStack stack(Item item) {
     boot();
     bind(item);
     return new ItemStack(item);

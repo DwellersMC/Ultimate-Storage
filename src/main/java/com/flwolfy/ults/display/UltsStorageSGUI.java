@@ -1,6 +1,7 @@
 package com.flwolfy.ults.display;
 
 import com.flwolfy.ults.UltsRuntime;
+import com.flwolfy.ults.data.config.UltsConfigData;
 import com.flwolfy.ults.data.config.UltsConfigManager;
 import com.flwolfy.ults.data.config.UltsCraftingMode;
 import com.flwolfy.ults.data.config.UltsItemVisibility;
@@ -11,8 +12,12 @@ import eu.pb4.sgui.api.elements.GuiElement;
 import eu.pb4.sgui.api.elements.GuiElementBuilder;
 import eu.pb4.sgui.api.gui.SimpleGui;
 import java.lang.ref.WeakReference;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
@@ -46,6 +51,13 @@ public final class UltsStorageSGUI extends SimpleGui {
       47, 48, 49, 50, 51, 52, 53
   };
   private static final long SHULKER_SLOTS = 27L;
+  /** How a stored stamp is written on a special item row. */
+  private static final DateTimeFormatter STAMP_FORMAT = DateTimeFormatter
+      .ofPattern("yyyy-MM-dd HH:mm")
+      .withZone(ZoneId.systemDefault());
+  /** Newest first, which is the order the special category shows its rows in. */
+  private static final Comparator<UltsStoredView> NEWEST_FIRST =
+      Comparator.comparingLong(UltsStoredView::updatedAt).reversed();
   private static final List<WeakReference<UltsStorageSGUI>> OPEN_MENUS = new ArrayList<>();
   private final UltsRuntime runtime;
   private UltsItemCategory category;
@@ -324,7 +336,9 @@ public final class UltsStorageSGUI extends SimpleGui {
     }
     List<UltsStoredView> listed;
     if (selected.special()) {
-      listed = stored.stream().filter(selected::accepts).toList();
+      // Nothing holds more than one of a special stack, so the newest is what a player is looking
+      // for: the listing shows them the way the storage trims them.
+      listed = stored.stream().filter(selected::accepts).sorted(NEWEST_FIRST).toList();
     } else {
       List<ItemStack> templates = selected.templates();
       List<UltsStoredView> computed = new ArrayList<>(templates.size());
@@ -338,8 +352,10 @@ public final class UltsStorageSGUI extends SimpleGui {
         computed.add(new UltsStoredView(template, amount, false));
       }
       if (UltsCreativeCatalog.ALL_ID.equals(selected.id())) {
-        // The "everything" view also carries the stored NBT specific items, after the catalog.
-        stored.stream().filter(UltsStoredView::special).forEach(computed::add);
+        // The "everything" view also carries the stored NBT specific items, after the catalog, in the
+        // same newest first order the special category uses.
+        stored.stream().filter(UltsStoredView::special).sorted(NEWEST_FIRST)
+            .forEach(computed::add);
       }
       listed = computed;
     }
@@ -388,22 +404,32 @@ public final class UltsStorageSGUI extends SimpleGui {
     if (boxSize > 0 && amount >= boxSize) {
       builder.addLoreLine(UltsGuiText.boxes(amount / boxSize, amount % boxSize));
     }
-    long craftable = runtime.craftable(template, stock);
-    if (craftable > 0) {
+    boolean openable;
+    if (view.special()) {
+      // A special stack cannot stack with anything, so what could be made of one says nothing about
+      // this row. What a player wants to know is when it turned up: the stamp it is sorted by.
       builder.addLoreLine(UltsGuiText.labelled(
-          "ults.gui.craftable", UltsGuiText.format(craftable), false));
-    } else if (runtime.craftableWithoutStation(template, stock) > 0) {
-      // The recipe is there and the material is there, only the station is missing: say so instead of
-      // hiding the line, so it is obvious why nothing can be crafted.
-      builder.addLoreLine(UltsGuiText.labelled(
-          "ults.gui.craftable",
-          UltsGuiText.text("ults.gui.craftable.no_station").getString(),
-          true));
+          "ults.gui.special.updated", stamp(view.updatedAt()), !view.stampKnown()));
+      openable = amount > 0;
+    } else {
+      long craftable = runtime.craftable(template, stock);
+      if (craftable > 0) {
+        builder.addLoreLine(UltsGuiText.labelled(
+            "ults.gui.craftable", UltsGuiText.format(craftable), false));
+      } else if (runtime.craftableWithoutStation(template, stock) > 0) {
+        // The recipe is there and the material is there, only the station is missing: say so instead of
+        // hiding the line, so it is obvious why nothing can be crafted.
+        builder.addLoreLine(UltsGuiText.labelled(
+            "ults.gui.craftable",
+            UltsGuiText.text("ults.gui.craftable.no_station").getString(),
+            true));
+      }
+      // A row opens the withdrawal screen while the storage holds the item or could craft it, so an
+      // item that is not stored but can be made right now is just as usable. The view answers this even
+      // while the exact amount is still being worked out for a later tick.
+      openable = amount > 0 || craftable > 0 || runtime.craftableNow(template, stock);
     }
-    // A row opens the withdrawal screen while the storage holds the item or could craft it, so an
-    // item that is not stored but can be made right now is just as usable. The view answers this even
-    // while the exact amount is still being worked out for a later tick.
-    if (amount > 0 || craftable > 0 || runtime.craftableNow(template, stock)) {
+    if (openable) {
       builder
           .addLoreLine(UltsGuiText.text("ults.gui.open_withdraw").copy()
               .withStyle(ChatFormatting.GRAY))
@@ -417,6 +443,14 @@ public final class UltsStorageSGUI extends SimpleGui {
     return builder;
   }
 
+  /** A stored stamp as it is shown on a row, or a dash for a save that predates the stamps. */
+  private static String stamp(long millis) {
+    if (millis <= 0L) {
+      return UltsGuiText.text("ults.gui.special.updated.unknown").getString();
+    }
+    return STAMP_FORMAT.format(Instant.ofEpochMilli(millis));
+  }
+
   private GuiElementBuilder statusButton(
       int selectedIndex,
       int categoryCount,
@@ -427,6 +461,8 @@ public final class UltsStorageSGUI extends SimpleGui {
       int itemPages
   ) {
     long stocked = items.stream().filter(view -> view.amount() > 0).count();
+    int specialCount = runtime.state().specialCount();
+    int specialLimit = UltsConfigManager.getInstance().data().special().maxEntries();
     GuiElementBuilder builder = element(Items.WRITABLE_BOOK)
         .setName(UltsGuiText.text("ults.gui.status").copy().withStyle(ChatFormatting.YELLOW))
         .addLoreLine(UltsGuiText.labelled(
@@ -447,6 +483,14 @@ public final class UltsStorageSGUI extends SimpleGui {
             "ults.gui.types", "ults.gui.types.suffix", items.size(), false))
         .addLoreLine(UltsGuiText.labelled(
             "ults.gui.types.stored", "ults.gui.types.stored.suffix", stocked, false))
+        .addLoreLine(UltsGuiText.labelled(
+            "ults.gui.status.special",
+            specialCount + " / " + specialLimit,
+            specialLimit <= 0 || specialCount >= specialLimit))
+        .addLoreLine(UltsGuiText.labelled(
+            "ults.gui.status.special.pages",
+            UltsConfigData.pagesOf(specialCount) + " / " + UltsConfigData.pagesOf(specialLimit),
+            specialLimit <= 0))
         .addLoreLine(UltsGuiText.labelled(
             "ults.gui.visibility",
             UltsGuiText.text("ults.config.item_visibility."

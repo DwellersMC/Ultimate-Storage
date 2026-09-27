@@ -5,13 +5,10 @@ import static com.flwolfy.ults.util.UltsTextBuilder.success;
 
 import com.flwolfy.ults.UltsMod;
 import com.flwolfy.ults.UltsRuntime;
-import com.flwolfy.ults.crafting.UltsCraftCatalog;
 import com.flwolfy.ults.data.config.UltsConfigManager;
 import com.flwolfy.ults.data.lang.UltsLangManager;
 import com.flwolfy.ults.data.state.UltsBinding;
-import com.flwolfy.ults.display.UltsCreativeCatalog;
 import com.flwolfy.ults.display.UltsStorageSGUI;
-import com.flwolfy.ults.display.UltsSurvivalItems;
 import com.flwolfy.ults.input.UltsInputManager;
 import com.flwolfy.ults.util.UltsTextBuilder;
 import com.mojang.brigadier.CommandDispatcher;
@@ -27,7 +24,6 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.resources.Identifier;
-import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.phys.BlockHitResult;
@@ -435,15 +431,17 @@ public final class UltsCommand {
   private static int reload(CommandContext<CommandSourceStack> context) {
     boolean success = UltsConfigManager.getInstance().reload();
     if (success) {
-      // Recipes, loot tables, trades and creative tabs are all server data, so a reload has to read
-      // them again: a data pack that was changed while the server runs takes effect with this command.
+      // What this command reads is whatever the server currently holds, and it reads all of it again:
+      // loot tables and trades are opened straight from the resource manager, so a folder data pack
+      // that was edited or added to while the server runs is picked up here without a restart.
+      //
+      // Two of them are snapshots the server took when it last loaded its data packs, so they only
+      // move after a vanilla {@code /reload}: the recipe manager the crafting catalogue is built from,
+      // and the creative tabs the listings are built from. Everything else follows this command alone.
       UltsRuntime runtime = UltsMod.getRuntime();
       if (runtime != null) {
-        MinecraftServer server = runtime.server();
         long started = System.nanoTime();
-        UltsCreativeCatalog.rebuild(server);
-        UltsSurvivalItems.rebuild(server);
-        UltsCraftCatalog.rebuild(server);
+        UltsRuntime.rebuildCatalogs(runtime.server());
         UltsMod.LOGGER.info(
             "UltStorage reloaded; automatic crafting is {}, catalogs read again in {} ms",
             runtime.craftingMode(), (System.nanoTime() - started) / 1_000_000L);

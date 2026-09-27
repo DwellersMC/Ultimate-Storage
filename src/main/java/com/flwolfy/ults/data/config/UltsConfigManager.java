@@ -135,6 +135,7 @@ public final class UltsConfigManager {
     mergeDefaults(root, GSON.toJsonTree(UltsConfigData.DEFAULT).getAsJsonObject());
     dropRetiredVisibility(root);
     dropRetiredCrafting(root);
+    dropRetiredFilterMode(root);
     UltsConfigData loaded = GSON.fromJson(root, UltsConfigData.class);
     if (loaded == null || !loaded.validate().isEmpty()) {
       throw new IllegalArgumentException("Invalid Ults config fields: "
@@ -183,6 +184,27 @@ public final class UltsConfigManager {
       String fallback = UltsConfigData.DEFAULT.input().crafting().name();
       object.addProperty("crafting", fallback);
       UltsMod.LOGGER.warn("UltStorage: unknown crafting '{}' was replaced by '{}'",
+          value.getAsString(), fallback);
+    }
+  }
+
+  /** A special filter mode that is not part of the mod any more falls back to the default one. */
+  private static void dropRetiredFilterMode(JsonObject root) {
+    JsonElement special = root.get("special");
+    if (special == null || !special.isJsonObject()) {
+      return;
+    }
+    JsonObject object = special.getAsJsonObject();
+    JsonElement value = object.get("filterMode");
+    if (value == null || !value.isJsonPrimitive()) {
+      return;
+    }
+    try {
+      UltsSpecialFilter.valueOf(value.getAsString());
+    } catch (IllegalArgumentException retired) {
+      String fallback = UltsConfigData.DEFAULT.special().filterMode().name();
+      object.addProperty("filterMode", fallback);
+      UltsMod.LOGGER.warn("UltStorage: unknown filterMode '{}' was replaced by '{}'",
           value.getAsString(), fallback);
     }
   }

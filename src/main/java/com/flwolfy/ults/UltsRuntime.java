@@ -11,6 +11,7 @@ import com.flwolfy.ults.data.state.UltsBinding;
 import com.flwolfy.ults.data.state.UltsRemoteStorage;
 import com.flwolfy.ults.data.state.UltsState;
 import com.flwolfy.ults.data.state.UltsStoredView;
+import com.flwolfy.ults.data.state.UltsSpecialFilters;
 import com.flwolfy.ults.data.state.UltsWithdrawalPlan;
 import com.flwolfy.ults.display.UltsCreativeCatalog;
 import com.flwolfy.ults.display.UltsStorageSGUI;
@@ -116,12 +117,43 @@ public final class UltsRuntime {
 
   UltsRuntime(MinecraftServer server) {
     this.server = server;
-    UltsCreativeCatalog.rebuild(server);
-    UltsSurvivalItems.rebuild(server);
-    UltsCraftCatalog.rebuild(server);
+    rebuildCatalogs(server);
     UltsMod.LOGGER.info("UltStorage automatic crafting is {}", craftingMode());
     state = server.overworld().getDataStorage().computeIfAbsent(UltsState.TYPE);
     inputs = new UltsInputManager(server, state);
+  }
+
+  /**
+   * Reads every catalogue the storage works from off the running server.
+   *
+   * <p>Called once at startup and again by {@code /ults reload}, so the two can never drift apart.
+   *
+   * <p>Where each catalogue comes from decides what a reload can pick up:
+   *
+   * <ul>
+   *   <li>Loot tables and villager trades are opened straight from the server's resource manager, and
+   *       the resource manager lists them afresh on every call, so a folder data pack that was edited
+   *       or added to while the server runs is seen here without a restart.
+   *   <li>The recipe manager and the creative tabs are snapshots the server took when it last loaded
+   *       its data packs, so those two only move after a vanilla {@code /reload}.
+   * </ul>
+   *
+   * <p>The equipment the survival catalogue finds in the loot tables is half of the special item
+   * filter, so the filter is rebuilt from the freshly read set in the same breath. The other half, the
+   * item ids the configuration names, comes from the configuration {@code /ults reload} reloads just
+   * before this.
+   *
+   * @param server the running server
+   */
+  public static void rebuildCatalogs(MinecraftServer server) {
+    UltsCreativeCatalog.rebuild(server);
+    UltsSurvivalItems.rebuild(server);
+    UltsCraftCatalog.rebuild(server);
+    UltsSpecialFilters.rebuild(UltsSurvivalItems.lootEquipment());
+    UltsMod.LOGGER.info(
+        "UltStorage special filter: {} item(s) named, {} loot table equipment, mode {}",
+        UltsSpecialFilters.declaredSize(), UltsSpecialFilters.lootEquipmentSize(),
+        UltsConfigManager.getInstance().data().special().filterMode());
   }
 
   public MinecraftServer server() {

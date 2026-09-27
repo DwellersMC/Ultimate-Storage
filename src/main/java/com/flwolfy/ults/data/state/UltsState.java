@@ -1,6 +1,7 @@
 package com.flwolfy.ults.data.state;
 
 import com.flwolfy.ults.crafting.UltsCraftPool;
+import com.flwolfy.ults.data.config.UltsConfigManager;
 import com.flwolfy.ults.data.config.UltsCraftingMode;
 import com.flwolfy.ults.display.UltsCreativeCatalog;
 import com.mojang.serialization.Codec;
@@ -15,19 +16,23 @@ import java.util.Map;
 import java.util.UUID;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.component.DataComponents;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.Identifier;
 import net.minecraft.util.datafix.DataFixTypes;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.component.ItemContainerContents;
 import net.minecraft.world.level.saveddata.SavedData;
 import net.minecraft.world.level.saveddata.SavedDataType;
-import org.jetbrains.annotations.Nullable;
 
 /**
  * Saved state of the one server storage.
  *
  * <p>It owns an ordered list of container bindings ({@code #1 #2 ...}, each with an optional note for
  * humans) and, in void mode, the single pool of stored items.
+ *
+ * <p>Every kind of item remembers when it was last put in. Only the special category has a use for
+ * that — it sorts and trims by it — but the stamp is kept for every kind so a stack that moves between
+ * the two categories keeps its history.
  */
 public final class UltsState extends SavedData {
 
@@ -69,12 +74,17 @@ public final class UltsState extends SavedData {
     this.pool.addAll(sanitize(pool));
     this.viewProfiles.putAll(viewProfiles);
     reindex();
+    // The cap may have been lowered since this save was written, so it is applied on the way in too.
+    if (trimSpecial()) {
+      setDirty();
+    }
   }
 
   private static List<UltsStoredEntry> sanitize(List<UltsStoredEntry> entries) {
     List<UltsStoredEntry> clean = new ArrayList<>();
     entries.stream().filter(entry -> !entry.template().isEmpty() && entry.amount() > 0)
-        .forEach(entry -> clean.add(new UltsStoredEntry(entry.template(), entry.amount())));
+        .forEach(entry -> clean.add(new UltsStoredEntry(
+            entry.template(), entry.amount(), entry.updatedAt())));
     return clean;
   }
 
@@ -149,32 +159,96 @@ public final class UltsState extends SavedData {
   public synchronized List<UltsStoredView> items() {
     return pool.stream()
         .map(entry -> new UltsStoredView(
-            entry.template(), entry.amount(), !UltsCreativeCatalog.contains(entry.template())))
+            entry.template(), entry.amount(),
+            !UltsCreativeCatalog.contains(entry.template()), entry.updatedAt()))
         .sorted(Comparator.comparing(
             value -> value.template().getHoverName().getString(), String.CASE_INSENSITIVE_ORDER))
         .toList();
+  }
+
+  /** How many kinds of item the storage holds that carry data of their own. */
+  public synchronized int specialCount() {
+    int special = 0;
+    for (UltsStoredEntry entry : pool) {
+      if (!UltsCreativeCatalog.contains(entry.template())) {
+        special++;
+      }
+    }
+    return special;
   }
 
   public synchronized void deposit(ItemStack source) {
     if (source.isEmpty()) {
       return;
     }
-    int outerCount = source.getCount();
-    // A box a player named is theirs: it goes in as it is, contents and all, and is never taken apart
-    // or used as packaging material. An unnamed box is opened, so what it holds joins the storage.
+    store(source, source.getCount());
+    changed();
+  }
+
+  /**
+   * Puts one stack, or one box and everything it holds, into the pool.
+   *
+   * <p>A box a player named is theirs: it goes in as it is, contents and all, and is never taken apart
+   * or used as packaging material. An unnamed box is opened, so what it holds joins the storage.
+   *
+   * <p>Once the stacks are in, the special category is brought back inside its cap, which destroys the
+   * least recently stored of them.
+   */
+  private void store(ItemStack source, long outerCount) {
+    if (source.isEmpty() || outerCount < 1L) {
+      return;
+    }
     if (UltsBoxes.isShulker(source) && !UltsBoxes.isNamed(source)) {
       ItemContainerContents contents = source.get(DataComponents.CONTAINER);
       ItemStack emptyBox = source.copyWithCount(1);
       emptyBox.set(DataComponents.CONTAINER, ItemContainerContents.fromItems(List.of()));
-      add(pool, emptyBox, outerCount);
+      keep(emptyBox, outerCount);
       if (contents != null) {
         contents.allItemsCopyStream().forEach(inner ->
-            add(pool, inner, Math.multiplyExact((long) inner.getCount(), outerCount)));
+            keep(inner, Math.multiplyExact((long) inner.getCount(), outerCount)));
       }
     } else {
-      add(pool, source, outerCount);
+      keep(source, outerCount);
     }
-    changed();
+    trimSpecial();
+  }
+
+  /** One stack, kept unless it would take a special row the filter does not want. */
+  private void keep(ItemStack source, long amount) {
+    if (source.isEmpty() || amount < 1L) {
+      return;
+    }
+    ItemStack template = source.copyWithCount(1);
+    // A plain item the catalogue knows stacks with its own kind and is never special; only a stack
+    // that would land in the special category can be thrown away by the filter.
+    if (!UltsCreativeCatalog.contains(template) && UltsSpecialFilters.destroys(template)) {
+      return;
+    }
+    add(pool, template, amount, now());
+  }
+
+  /**
+   * Destroys the least recently stored special stacks while the special category is over its cap.
+   *
+   * @return whether anything was destroyed
+   */
+  private boolean trimSpecial() {
+    int limit = UltsConfigManager.getInstance().data().special().maxEntries();
+    List<UltsStoredEntry> specials = new ArrayList<>();
+    for (UltsStoredEntry entry : pool) {
+      if (!UltsCreativeCatalog.contains(entry.template())) {
+        specials.add(entry);
+      }
+    }
+    int excess = specials.size() - limit;
+    if (excess <= 0) {
+      return false;
+    }
+    specials.sort(Comparator.comparingLong(UltsStoredEntry::updatedAt));
+    for (int index = 0; index < excess; index++) {
+      pool.remove(specials.get(index));
+    }
+    return true;
   }
 
   public synchronized UltsWithdrawalPlan withdrawalPlan(
@@ -249,12 +323,19 @@ public final class UltsState extends SavedData {
     return contents;
   }
 
-  /** Writes a pile back as the stored items. */
+  /** Writes a pile back as the stored items, keeping the stamp of every kind that was already here. */
   private void adoptPool(UltsCraftPool contents) {
+    Map<String, Long> stamps = new HashMap<>();
+    for (UltsStoredEntry entry : pool) {
+      stamps.putIfAbsent(stampKey(entry.template()), entry.updatedAt());
+    }
     pool.clear();
     for (UltsStoredView view : contents.views()) {
-      pool.add(new UltsStoredEntry(view.template(), view.amount()));
+      pool.add(new UltsStoredEntry(
+          view.template(), view.amount(),
+          stamps.getOrDefault(stampKey(view.template()), now())));
     }
+    trimSpecial();
   }
 
   // Empty shulker boxes in packing order: the default colour first, then the remaining colours.
@@ -269,11 +350,10 @@ public final class UltsState extends SavedData {
     return boxes;
   }
 
-  private static void add(List<UltsStoredEntry> pool, ItemStack source, long amount) {
-    if (source.isEmpty() || amount < 1) {
+  private static void add(List<UltsStoredEntry> pool, ItemStack template, long amount, long stamp) {
+    if (template.isEmpty() || amount < 1) {
       return;
     }
-    ItemStack template = source.copyWithCount(1);
     for (int index = 0; index < pool.size(); index++) {
       UltsStoredEntry entry = pool.get(index);
       if (ItemStack.isSameItemSameComponents(entry.template(), template)) {
@@ -283,11 +363,22 @@ public final class UltsState extends SavedData {
         } catch (ArithmeticException ignored) {
           sum = Long.MAX_VALUE;
         }
-        pool.set(index, new UltsStoredEntry(template, sum));
+        // Putting more of a kind in counts as that kind arriving again, which is what the special
+        // category sorts and trims by.
+        pool.set(index, new UltsStoredEntry(entry.template(), sum, stamp));
         return;
       }
     }
-    pool.add(new UltsStoredEntry(template, amount));
+    pool.add(new UltsStoredEntry(template, amount, stamp));
+  }
+
+  /** A key that names a stack by item and components, which is what one pool entry stands for. */
+  private static String stampKey(ItemStack template) {
+    return BuiltInRegistries.ITEM.getKey(template.getItem()) + "|" + template.getComponentsPatch();
+  }
+
+  private static long now() {
+    return System.currentTimeMillis();
   }
 
   private void changed() {
