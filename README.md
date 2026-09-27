@@ -97,7 +97,8 @@ config/ults.json
     "maxBindings": 0,
     "drainInterval": 2,
     "multiBlockContainers": [],
-    "crafting": "DISABLED"
+    "crafting": "DISABLED",
+    "allowFullInventory": false
   },
   "special": {
     "maxEntries": 350,
@@ -131,6 +132,7 @@ A missing file, a missing field or an unknown enum value falls back to the defau
 | `drainInterval`         | `int`      | Ticks between two drain visits of the same bound container, from `1` to `20`; defaults to `2`. The hoppers of an input path are emptied every tick regardless, see below. |
 | `multiBlockContainers`  | `string[]` | Block ids whose connected blocks together form one large container; see below. Empty by default.                                 |
 | `crafting`              | `enum`     | Whether a withdrawal may craft what is missing: `DISABLED`, `SHULKER_BOXES_ONLY` or `ALL`; see below. Disabled by default.       |
+| `allowFullInventory`    | `bool`     | Whether a withdrawal may go ahead when the player's backpack cannot hold everything it asks for. What does not fit is dropped on the ground as an item. Defaults to `false`, which refuses the request instead. |
 
 ### Special Settings
 
@@ -152,16 +154,23 @@ A stack that carries data of its own — a named sword, an enchanted book, a wri
 - **Newest first.** The category lists the most recently stored entry at the top.
 - **When it arrived.** A special row never shows a craftable amount: what could be made of an item says nothing about one particular named sword. The row shows **when that entry was last stored** instead, and the very same time is what the listing sorts and trims by. Storing the same stack again — a second identical named sword — counts as it arriving again: the two share one row, and that row's time, amount and position all move to the front.
 - **A cap with the least recently stored going first.** Once the category holds more than `special.maxEntries` entries, the ones with the oldest time are destroyed as new ones arrive. The cap counts **kinds, not pieces**: two identically named swords share one entry, so they cost one and refreshing them pushes nothing out. The cap is enforced again when the world loads, so lowering it trims an existing storage.
-- **A filter for what is not worth a row.** Items named in `special.filters`, plus — when `special.filterLootEquipment` is on — every piece of equipment a loot table can drop, are thrown away instead of being stored. `special.filterMode` decides how hard it comes down on them:
+- **A filter for what is not worth a row.** Items named in `special.filters`, plus — when `special.filterLootEquipment` is on — every piece of equipment a loot table can drop, are taken out of the storage. `special.filterMode` decides how hard it comes down on them:
 
 | Mode                   | What happens to a filtered special stack                                                            |
 |------------------------|-----------------------------------------------------------------------------------------------------|
 | `OFF`                  | Nothing. The list is not in effect and every special stack is kept. This is the default.             |
-| `KEEP_FULL_DURABILITY` | A pristine one is kept, a worn one is destroyed. A stack that carries no durability counts as pristine. |
-| `FILTER_ALL`           | Destroyed whatever state it is in.                                                                  |
+| `KEEP_FULL_DURABILITY` | A pristine one is kept, a worn one is taken out of the storage. A stack that carries no durability counts as pristine. |
+| `FILTER_ALL`           | Taken out of the storage whatever state it is in.                                                   |
+
+- **The filter means different things to the two storage modes**, because they own their items differently:
+
+| Mode     | What a filtered stack gets                                                                                                              |
+|----------|------------------------------------------------------------------------------------------------------------------------------------------|
+| `VOID`   | **Destroyed.** The storage holds these items itself, so they are thrown away on the way in — and applying the filter again clears out what was already stored, so changing the filter empties the store of what it now names rather than only stopping new arrivals. |
+| `REMOTE` | **Hidden.** The items sit in containers a player bound, which are not the storage's to destroy, so nothing is ever removed: a filtered stack simply never appears in a listing, a box count or a plan. Take it out of the chest by hand if you want it. |
 
 - **Only special stacks are affected.** A plain iron sword stacks with its own kind, so it is never special and the filter never touches it — however its item is listed. The filter only ever sees the stacks that would otherwise take a special row.
-- The filter is applied on the way in, including the contents of an unnamed shulker box being emptied into the storage. Anything it throws away is gone: there is no bin to recover it from.
+- In `VOID` mode the filter is applied on the way in, including the contents of an unnamed shulker box being emptied into the storage, and again whenever the filter is applied. Anything it destroys is gone: there is no bin to recover it from.
 - The survival catalogue already walks every loot table, so the equipment list is derived from the same pass and costs nothing extra. In vanilla 26.2 it names 52 items.
 - The Mod Menu screen validates every item id while you type and refuses to save one that names no item of the running game.
 
@@ -217,6 +226,8 @@ In `REMOTE` mode nothing is drained: the bound containers keep their items, so t
 | `AVAILABLE` | What the storage can hand over right now: everything in stock, plus everything that can be crafted at this moment while automatic crafting is on and a station is stored. Categories without such an item are hidden. This is the configured default. |
 
 The configured mode is the **default**, not a fixed setting: every player can switch their own mode with a right-click on the status book of the storage screen, and the choice is remembered with their other view settings. Showing everything is only on offer while the configured default already is `ALL`, or while the player may manage the storage, so a plain player cannot open a view the owner did not hand out. There is no way back to "default" other than switching again.
+
+The special item filter is a second, separate kind of hiding: it applies in every visibility mode and in the `REMOTE` storage mode it is what keeps filtered stacks out of the listings. See [Special Data Items](#special-data-items).
 
 #### How the survival catalogue is derived
 
@@ -313,7 +324,7 @@ The withdrawal screen asks for an amount above an anvil-style input and offers t
 | Item mode      | Withdraw that many loose items.                                                                            |
 | Full-box mode  | Treat the amount as a number of shulker boxes, consume that many empty boxes and fill each with 27 full stacks. |
 
-The left slot of the anvil holds the cancel button, which returns to the storage screen, and the middle slot switches between the two modes. The middle slot also reports what the request needs: the stored amount, the amount asked for, how many items and how many boxes would be crafted, and in full-box mode how many empty boxes are available and how many of them are used. The cancel label is the first tooltip line of that button rather than its name, because the vanilla client copies the name of the item in this slot into the input field: a name would fill the field with the sentence and every later keystroke would be appended to it. Confirmation stays unavailable and explains itself while the request cannot be fulfilled: a non-positive amount, packing shulker boxes inside shulker boxes, more than 36 result stacks, not enough stored items or empty boxes, or a backpack that cannot hold the complete result. Confirming revalidates everything and deducts atomically, so two players cannot withdraw the same items.
+The left slot of the anvil holds the cancel button, which returns to the storage screen, and the middle slot switches between the two modes. The middle slot also reports what the request needs: the stored amount, the amount asked for, how many items and how many boxes would be crafted, and in full-box mode how many empty boxes are available and how many of them are used. The cancel label is the first tooltip line of that button rather than its name, because the vanilla client copies the name of the item in this slot into the input field: a name would fill the field with the sentence and every later keystroke would be appended to it. Confirmation stays unavailable and explains itself while the request cannot be fulfilled: a non-positive amount, packing shulker boxes inside shulker boxes, more than 36 result stacks, not enough stored items or empty boxes, or a backpack that cannot hold the complete result. Confirming revalidates everything and deducts atomically, so two players cannot withdraw the same items. With `input.allowFullInventory` on, a backpack that cannot hold the complete result no longer blocks the request: the confirmation button says so in red, and whatever does not fit is dropped on the ground as an item.
 
 The filter screen uses the same three slots: cancel, clear the filter, and apply what was typed.
 

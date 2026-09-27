@@ -156,6 +156,28 @@ public final class UltsRuntime {
         UltsConfigManager.getInstance().data().special().filterMode());
   }
 
+  /**
+   * Reads everything again after the configuration or a data pack changed, which is what
+   * {@code /ults reload} does.
+   *
+   * <p>Reading the catalogues is not quite enough for the special item filter: a filter that now
+   * names an item has to clear out what the void storage already holds of it, or it would only ever
+   * stop new arrivals and the storage would stay full of what it is meant to be rid of. Remote
+   * storage keeps nothing of its own — its items sit in containers the storage does not own — so
+   * there is nothing to clear and the filter only hides them from the listings.
+   */
+  public void reload() {
+    rebuildCatalogs(server);
+    if (state.purgeFiltered()) {
+      UltsMod.LOGGER.info("UltStorage destroyed the stored stacks the special filter now dismisses");
+    }
+  }
+
+  /** Whether a withdrawal may go ahead with no room in the inventory, dropping what does not fit. */
+  public boolean allowFullInventory() {
+    return UltsConfigManager.getInstance().data().input().allowFullInventory();
+  }
+
   public MinecraftServer server() {
     return server;
   }

@@ -57,6 +57,7 @@ public final class UltsConfigScreen {
     Field<Integer> maxBindings = new Field<>(current.input().maxBindings());
     Field<Integer> drainInterval = new Field<>(current.input().drainInterval());
     Field<UltsCraftingMode> crafting = new Field<>(current.input().crafting());
+    Field<Boolean> allowFullInventory = new Field<>(current.input().allowFullInventory());
     Field<Integer> maxSpecial = new Field<>(current.special().maxEntries());
     Field<Boolean> filterLoot = new Field<>(current.special().filterLootEquipment());
     Field<UltsSpecialFilter> filterMode = new Field<>(current.special().filterMode());
@@ -82,6 +83,7 @@ public final class UltsConfigScreen {
         countEntry(entries, maxBindings, "max_bindings"),
         drainEntry(entries, drainInterval),
         craftingEntry(entries, crafting),
+        fullInventoryEntry(entries, allowFullInventory),
         idListEntry(entries, "multi_block_containers", multiBlock, false)
     );
     List<AbstractConfigListEntry<?>> specialEntries = List.of(
@@ -101,6 +103,7 @@ public final class UltsConfigScreen {
         countEntry(entries, maxBindings, "max_bindings"),
         drainEntry(entries, drainInterval),
         craftingEntry(entries, crafting),
+        fullInventoryEntry(entries, allowFullInventory),
         idListEntry(entries, "multi_block_containers", multiBlock, true)
     );
     List<AbstractConfigListEntry<?>> specialOverview = List.of(
@@ -128,7 +131,8 @@ public final class UltsConfigScreen {
               maxBindings.resolve(),
               drainInterval.resolve(),
               multiBlock.values(),
-              crafting.resolve()
+              crafting.resolve(),
+              allowFullInventory.resolve()
           ),
           new UltsConfigData.Special(
               maxSpecial.resolve(),
@@ -261,6 +265,19 @@ public final class UltsConfigScreen {
         .setTooltip(Component.translatable(KEY + "crafting.tooltip"))
         .setEnumNameProvider(value -> Component.translatable(
             KEY + "crafting." + value.name().toLowerCase(Locale.ROOT)))
+        .build();
+    return field.track(entry);
+  }
+
+  /** Whether a withdrawal may exceed the room left in the player's inventory. */
+  private static AbstractConfigListEntry<?> fullInventoryEntry(
+      ConfigEntryBuilder entries,
+      Field<Boolean> field
+  ) {
+    AbstractConfigListEntry<Boolean> entry = entries.startBooleanToggle(
+            Component.translatable(KEY + "allow_full_inventory"), field.initial())
+        .setDefaultValue(UltsConfigData.DEFAULT.input().allowFullInventory())
+        .setTooltip(Component.translatable(KEY + "allow_full_inventory.tooltip"))
         .build();
     return field.track(entry);
   }

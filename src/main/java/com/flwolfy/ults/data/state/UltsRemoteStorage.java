@@ -74,6 +74,12 @@ public final class UltsRemoteStorage {
         if (stack.isEmpty()) {
           continue;
         }
+        // Remote storage has no pool to destroy anything in, and a bound container is not the
+        // storage's to empty, so the filter only hides: a dismissed stack stays where it is and never
+        // reaches a listing, a box count or a plan.
+        if (UltsSpecialFilters.dismisses(stack)) {
+          continue;
+        }
         addItem(grouped, stack);
         if (UltsBoxes.isPackable(stack)) {
           addBox(boxes, stack);

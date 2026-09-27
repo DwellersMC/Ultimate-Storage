@@ -25,12 +25,24 @@ public record UltsConfigData(General general, Input input, Special special) {
       UltsStorageMode storageMode
   ) {}
 
+  /**
+   * How the storage is fed and emptied.
+   *
+   * @param permissionLevel vanilla permission level needed to manage the storage
+   * @param maxBindings how many containers may be bound; {@code 0} is unlimited
+   * @param drainInterval ticks between two drain visits of one bound container
+   * @param multiBlockContainers block ids whose connected blocks form one large container
+   * @param crafting whether a withdrawal may craft what is missing
+   * @param allowFullInventory whether a withdrawal may go ahead with no room in the inventory, in
+   *     which case what does not fit is dropped on the ground
+   */
   public record Input(
       int permissionLevel,
       int maxBindings,
       int drainInterval,
       List<String> multiBlockContainers,
-      UltsCraftingMode crafting
+      UltsCraftingMode crafting,
+      boolean allowFullInventory
   ) {}
 
   /**
@@ -50,7 +62,7 @@ public record UltsConfigData(General general, Input input, Special special) {
 
   public static final UltsConfigData DEFAULT = new UltsConfigData(
       new General("en_us", UltsItemVisibility.AVAILABLE, UltsStorageMode.VOID),
-      new Input(2, 0, 2, List.of(), UltsCraftingMode.DISABLED),
+      new Input(2, 0, 2, List.of(), UltsCraftingMode.DISABLED, false),
       new Special(
           DEFAULT_SPECIAL_PAGES * SPECIAL_PAGE_SIZE,
           false,
@@ -121,7 +133,8 @@ public record UltsConfigData(General general, Input input, Special special) {
             input.maxBindings(),
             input.drainInterval(),
             normalize(input.multiBlockContainers()),
-            input.crafting()
+            input.crafting(),
+            input.allowFullInventory()
         ),
         new Special(
             special.maxEntries(),

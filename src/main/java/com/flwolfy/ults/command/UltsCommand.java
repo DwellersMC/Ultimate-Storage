@@ -441,7 +441,7 @@ public final class UltsCommand {
       UltsRuntime runtime = UltsMod.getRuntime();
       if (runtime != null) {
         long started = System.nanoTime();
-        UltsRuntime.rebuildCatalogs(runtime.server());
+        runtime.reload();
         UltsMod.LOGGER.info(
             "UltStorage reloaded; automatic crafting is {}, catalogs read again in {} ms",
             runtime.craftingMode(), (System.nanoTime() - started) / 1_000_000L);

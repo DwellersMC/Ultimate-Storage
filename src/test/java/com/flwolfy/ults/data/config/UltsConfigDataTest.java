@@ -33,15 +33,16 @@ class UltsConfigDataTest {
     UltsConfigData data = new UltsConfigData(
         UltsConfigData.DEFAULT.general(),
         new UltsConfigData.Input(
-            3, 0, 7, List.of("modid:Big_Chest"), UltsCraftingMode.ALL),
+            3, 0, 7, List.of("modid:Big_Chest"), UltsCraftingMode.ALL, true),
         UltsConfigData.DEFAULT.special());
     assertEquals(7, data.canonicalize().input().drainInterval());
     assertEquals(3, data.canonicalize().input().permissionLevel());
     // Listed block ids are normalised and duplicates are dropped.
     assertEquals(List.of("modid:big_chest"),
         data.canonicalize().input().multiBlockContainers());
-    // The crafting mode is carried through untouched.
+    // The crafting mode and the full-inventory option are carried through untouched.
     assertEquals(UltsCraftingMode.ALL, data.canonicalize().input().crafting());
+    assertTrue(data.canonicalize().input().allowFullInventory());
   }
 
   @Test
@@ -55,6 +56,11 @@ class UltsConfigDataTest {
     assertFalse(UltsConfigData.DEFAULT.input().crafting().enabled());
     assertTrue(UltsCraftingMode.SHULKER_BOXES_ONLY.enabled());
     assertTrue(UltsCraftingMode.ALL.enabled());
+  }
+
+  @Test
+  void aFullBackpackBlocksAWithdrawalUntilItIsAllowed() {
+    assertFalse(UltsConfigData.DEFAULT.input().allowFullInventory());
   }
 
   @Test

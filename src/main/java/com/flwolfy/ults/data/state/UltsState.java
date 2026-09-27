@@ -3,6 +3,7 @@ package com.flwolfy.ults.data.state;
 import com.flwolfy.ults.crafting.UltsCraftPool;
 import com.flwolfy.ults.data.config.UltsConfigManager;
 import com.flwolfy.ults.data.config.UltsCraftingMode;
+import com.flwolfy.ults.data.config.UltsStorageMode;
 import com.flwolfy.ults.display.UltsCreativeCatalog;
 import com.mojang.serialization.Codec;
 import com.mojang.serialization.codecs.RecordCodecBuilder;
@@ -74,8 +75,11 @@ public final class UltsState extends SavedData {
     this.pool.addAll(sanitize(pool));
     this.viewProfiles.putAll(viewProfiles);
     reindex();
-    // The cap may have been lowered since this save was written, so it is applied on the way in too.
-    if (trimSpecial()) {
+    // A cap or a filter that was changed while the server was down takes effect on the way in, so an
+    // existing storage is brought in line instead of waiting for the next stack to arrive.
+    boolean trimmed = trimSpecial();
+    trimmed |= purgeFiltered();
+    if (trimmed) {
       setDirty();
     }
   }
@@ -219,12 +223,32 @@ public final class UltsState extends SavedData {
       return;
     }
     ItemStack template = source.copyWithCount(1);
-    // A plain item the catalogue knows stacks with its own kind and is never special; only a stack
-    // that would land in the special category can be thrown away by the filter.
-    if (!UltsCreativeCatalog.contains(template) && UltsSpecialFilters.destroys(template)) {
+    // Void storage owns what it holds, so a stack the filter dismisses is destroyed here. A plain
+    // stack of the same item is never dismissed, so this only ever sees special stacks.
+    if (UltsSpecialFilters.dismisses(template)) {
       return;
     }
     add(pool, template, amount, now());
+  }
+
+  /**
+   * Destroys every stored stack the special filter dismisses.
+   *
+   * <p>Applying the filter again has to clean out what was stored before it named the item, otherwise
+   * a filter would only ever stop new arrivals and the storage would still be full of what it is
+   * meant to be rid of.
+   *
+   * <p>Remote storage holds nothing of its own, and the containers a player bound are not the
+   * storage's to empty, so there the filter only hides its items and this does nothing.
+   *
+   * @return whether anything was destroyed
+   */
+  public synchronized boolean purgeFiltered() {
+    if (pool.isEmpty()
+        || UltsConfigManager.getInstance().data().general().storageMode() != UltsStorageMode.VOID) {
+      return false;
+    }
+    return pool.removeIf(entry -> UltsSpecialFilters.dismisses(entry.template()));
   }
 
   /**

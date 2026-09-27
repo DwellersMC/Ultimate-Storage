@@ -4,6 +4,7 @@ import com.flwolfy.ults.UltsMod;
 import com.flwolfy.ults.data.config.UltsConfigData;
 import com.flwolfy.ults.data.config.UltsConfigManager;
 import com.flwolfy.ults.data.config.UltsSpecialFilter;
+import com.flwolfy.ults.display.UltsCreativeCatalog;
 import com.flwolfy.ults.util.UltsItemIds;
 import java.util.HashSet;
 import java.util.Set;
@@ -11,16 +12,29 @@ import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 
 /**
- * Which stacks that carry data of their own are not worth keeping.
+ * Which stacks that carry data of their own the storage dismisses.
  *
  * <p>An enchanted or worn tool cannot stack with anything, so it takes a row of the special category
  * for itself. A busy server ends up with hundreds of near identical swords nobody asked for, so the
- * configuration may name the items that are thrown away on sight instead. Two sources feed that list:
- * the ids a server owner writes down, and, when it is switched on, every piece of equipment a loot
- * table can drop, which is what fills those rows in the first place.
+ * configuration may name the items that are not worth a row. Two sources feed that list: the ids a
+ * server owner writes down, and, when it is switched on, every piece of equipment a loot table can
+ * drop, which is what fills those rows in the first place.
  *
  * <p>A plain stack of the same item is never touched: it stacks with its own kind, so it is not
  * special and never reaches this rule.
+ *
+ * <h2>What dismissing means</h2>
+ *
+ * <p>The two storage modes own their items differently, so the same decision has two outcomes:
+ *
+ * <ul>
+ *   <li><b>Void storage</b> keeps the items itself, so a dismissed stack is <b>destroyed</b>: it is
+ *       thrown away on the way in, and applying the filter again clears out whatever was stored
+ *       before it named the item.
+ *   <li><b>Remote storage</b> keeps the items in the containers a player bound, which are not the
+ *       storage's to destroy. There a dismissed stack is only <b>hidden</b>: it stays in its
+ *       container, and simply never appears in a listing, a box count or a plan.
+ * </ul>
  */
 public final class UltsSpecialFilters {
 
@@ -50,12 +64,16 @@ public final class UltsSpecialFilters {
   }
 
   /**
-   * Whether one special stack is destroyed instead of being stored.
+   * Whether the storage dismisses this stack.
+   *
+   * <p>Only a stack that would otherwise take a special row can be dismissed; a plain stack of the
+   * same item is left alone, however its item is listed. Callers then throw the stack away in void
+   * mode, or leave it out of a listing in remote mode.
    *
    * @param stack the stack as it would be stored, components and all
-   * @return whether the configuration throws it away
+   * @return whether the configuration dismisses it
    */
-  public static boolean destroys(ItemStack stack) {
+  public static boolean dismisses(ItemStack stack) {
     if (stack.isEmpty()) {
       return false;
     }
@@ -66,6 +84,11 @@ public final class UltsSpecialFilters {
     Item item = stack.getItem();
     if (!declared.contains(item)
         && !(special.filterLootEquipment() && lootEquipment.contains(item))) {
+      return false;
+    }
+    // A stack the catalogue knows is the plain one: it stacks with its own kind, so it is not special
+    // and the filter has no business with it.
+    if (UltsCreativeCatalog.contains(stack)) {
       return false;
     }
     if (special.filterMode() == UltsSpecialFilter.FILTER_ALL) {

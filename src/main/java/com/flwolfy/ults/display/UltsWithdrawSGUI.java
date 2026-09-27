@@ -69,8 +69,11 @@ public final class UltsWithdrawSGUI extends UltsAnvilInputGui {
     Integer quantity = parse(input);
     UltsWithdrawalPlan plan = runtime.withdrawalPlan(
         template, quantity == null ? 0 : quantity, boxed);
+    // A full inventory only blocks the request while the configuration says it should; with the
+    // option on the player would rather have the rest on the floor than not have it at all.
+    boolean overflowToGround = runtime.allowFullInventory();
     boolean inventorySpace = plan.available() && canFit(plan.outputs());
-    boolean confirmable = plan.available() && inventorySpace;
+    boolean confirmable = plan.available() && (inventorySpace || overflowToGround);
 
     ItemStack availableBox = runtime.availableBox();
     ItemStack boxIcon = availableBox.isEmpty() ? new ItemStack(Items.SHULKER_BOX) : availableBox;
@@ -117,15 +120,19 @@ public final class UltsWithdrawSGUI extends UltsAnvilInputGui {
         .setName(UltsGuiText.text(confirmable ? "ults.withdraw.confirm" : "ults.withdraw.unavailable")
             .copy().withStyle(confirmable ? ChatFormatting.GREEN : ChatFormatting.RED));
     if (!confirmable) {
-      confirm.addLoreLine(problem(plan, quantity, inventorySpace).copy()
+      confirm.addLoreLine(problem(plan, quantity).copy()
           .withStyle(ChatFormatting.RED));
     } else {
       confirm.addLoreLine(UltsGuiText.text(boxed
           ? "ults.withdraw.confirm.box" : "ults.withdraw.confirm.item", quantity)
           .copy().withStyle(ChatFormatting.GREEN));
+      if (!inventorySpace) {
+        confirm.addLoreLine(UltsGuiText.text("ults.withdraw.confirm.overflow").copy()
+            .withStyle(ChatFormatting.RED));
+      }
       confirm.setCallback(() -> {
         UltsGuiSound.confirm(player);
-        confirm(quantity);
+        confirm(quantity, overflowToGround);
       });
     }
     setSlot(2, confirm.build());
@@ -137,10 +144,10 @@ public final class UltsWithdrawSGUI extends UltsAnvilInputGui {
     UltsStorageSGUI.open(player, runtime);
   }
 
-  private void confirm(int quantity) {
+  private void confirm(int quantity, boolean overflowToGround) {
     synchronized (runtime.state()) {
       UltsWithdrawalPlan plan = runtime.withdrawalPlan(template, quantity, boxed);
-      if (!plan.available() || !canFit(plan.outputs())) {
+      if (!plan.available() || !(canFit(plan.outputs()) || overflowToGround)) {
         render();
         return;
       }
@@ -152,8 +159,10 @@ public final class UltsWithdrawSGUI extends UltsAnvilInputGui {
       for (ItemStack output : outputs) {
         player.getInventory().add(output);
         if (!output.isEmpty()) {
-          // Remote mode has no void pool, so anything that did not fit stays with the player.
-          if (runtime.remote()) {
+          // What the inventory could not take goes on the ground, which is what the option is for.
+          // Without it this only happens in remote mode, where there is no void pool to put a stack
+          // back into; the void store would otherwise swallow it again.
+          if (overflowToGround || runtime.remote()) {
             player.drop(output, false);
           } else {
             runtime.state().deposit(output);
@@ -169,11 +178,7 @@ public final class UltsWithdrawSGUI extends UltsAnvilInputGui {
     UltsStorageSGUI.open(player, runtime);
   }
 
-  private Component problem(
-      UltsWithdrawalPlan plan,
-      Integer quantity,
-      boolean inventorySpace
-  ) {
+  private Component problem(UltsWithdrawalPlan plan, Integer quantity) {
     if (quantity == null || quantity < 1) {
       return UltsGuiText.text("ults.withdraw.problem.invalid");
     }
@@ -190,8 +195,7 @@ public final class UltsWithdrawSGUI extends UltsAnvilInputGui {
         default -> UltsGuiText.text("ults.withdraw.problem.invalid");
       };
     }
-    return inventorySpace
-        ? Component.empty() : UltsGuiText.text("ults.withdraw.problem.inventory");
+    return UltsGuiText.text("ults.withdraw.problem.inventory");
   }
 
   private boolean canFit(List<ItemStack> outputs) {
