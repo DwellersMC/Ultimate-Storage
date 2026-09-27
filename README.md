@@ -170,6 +170,7 @@ A stack that carries data of its own — a named sword, an enchanted book, a wri
 | `REMOTE` | **Hidden.** The items sit in containers a player bound, which are not the storage's to destroy, so nothing is ever removed: a filtered stack simply never appears in a listing, a box count or a plan. Take it out of the chest by hand if you want it. |
 
 - **Only special stacks are affected.** A plain iron sword stacks with its own kind, so it is never special and the filter never touches it — however its item is listed. The filter only ever sees the stacks that would otherwise take a special row.
+- **A stack a player renamed is never touched either.** Giving something a name is a deliberate act — the stack is somebody's own thing, not anonymous loot — so the filter leaves it alone whatever the list and the mode say, in both storage modes. Enchanting is *not* renaming: enchanted gear is filtered like anything else. A named shulker box and everything inside it can therefore never be thrown away by the filter.
 - In `VOID` mode the filter is applied on the way in, including the contents of an unnamed shulker box being emptied into the storage, and again whenever the filter is applied. Anything it destroys is gone: there is no bin to recover it from.
 - The survival catalogue already walks every loot table, so the equipment list is derived from the same pass and costs nothing extra. In vanilla 26.2 it names 52 items.
 - The Mod Menu screen validates every item id while you type and refuses to save one that names no item of the running game.

@@ -8,6 +8,7 @@ import com.flwolfy.ults.display.UltsCreativeCatalog;
 import com.flwolfy.ults.util.UltsItemIds;
 import java.util.HashSet;
 import java.util.Set;
+import net.minecraft.core.component.DataComponents;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 
@@ -21,7 +22,8 @@ import net.minecraft.world.item.ItemStack;
  * drop, which is what fills those rows in the first place.
  *
  * <p>A plain stack of the same item is never touched: it stacks with its own kind, so it is not
- * special and never reaches this rule.
+ * special and never reaches this rule. Neither is a stack a player renamed, which is somebody's own
+ * thing rather than anonymous loot.
  *
  * <h2>What dismissing means</h2>
  *
@@ -70,11 +72,19 @@ public final class UltsSpecialFilters {
    * same item is left alone, however its item is listed. Callers then throw the stack away in void
    * mode, or leave it out of a listing in remote mode.
    *
+   * <p>A stack a player gave a name to is never dismissed. Renaming something is a deliberate act —
+   * the stack is somebody's, not anonymous loot — so the filter has no business with it, whatever the
+   * list or the mode says. Enchanting is not renaming, so enchanted gear is still filtered.
+   *
    * @param stack the stack as it would be stored, components and all
    * @return whether the configuration dismisses it
    */
   public static boolean dismisses(ItemStack stack) {
     if (stack.isEmpty()) {
+      return false;
+    }
+    // The name is the one rule that can never be overridden, so it is asked before anything else.
+    if (stack.has(DataComponents.CUSTOM_NAME)) {
       return false;
     }
     UltsConfigData.Special special = UltsConfigManager.getInstance().data().special();
