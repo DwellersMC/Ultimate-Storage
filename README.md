@@ -23,6 +23,7 @@ Storage belongs to the save, not to a name: a world has **one** storage, its inp
 - Multi-block containers: vanilla chests are recognised on their own, modded containers can be listed
 - Three item visibility modes, including a derived **survival obtainable** catalogue; the configured mode is the default and every player can switch their own with a right-click on the status book
 - Optional **automatic crafting**: when a withdrawal runs short, the storage crafts the missing part from what it has, following recipes down as far as it takes, using a stored crafting table or stonecutter
+- **Special data items** are managed rather than left to pile up: their category lists the newest first and shows *when* each stack was last stored, a configurable cap destroys the least recently stored ones past it, and a filter can throw unwanted ones away on sight — optionally including every piece of equipment a loot table can drop
 - Two storage modes: a server-side void store or the bound containers themselves (remote)
 - Bundled `en_us`, `zh_cn` and `zh_tw` messages; further locales are discovered at runtime
 - **Cloth Config** API support through Mod Menu (client-side, optional)
@@ -44,11 +45,24 @@ Storage belongs to the save, not to a name: a world has **one** storage, its inp
 | `/ults list (page)`                        | List all bindings as `#N <dimension, (x, y, z)> note`; the lines are clickable while allowed |
 | `/ults show`                               | Show the highlight of nearby bound containers to you                                        |
 | `/ults hide`                               | Hide your highlight again                                                                   |
-| `/ults reload`                             | Reload `config/ults.json` and read the server data (recipes, creative tabs, survival catalogue) again |
+| `/ults reload`                             | Reload `config/ults.json` and read the server data (loot tables, trades, recipe files, recipes, creative tabs) again |
 
 `/ults` and `/ults list` are open to everyone. Binding a container, binding an area, deleting bindings, the highlight and reloading need the **management permission level** (`input.permissionLevel`, vanilla level `0`-`4`, default `2`); the server console is always allowed. `/ults list` only offers the click-to-delete action to players that may delete.
 
 `/ults bind` and `/ults delete` use a reach of 6 blocks. Binding and deleting work on any part of a large container, not only on the block that was bound first. A selection is written with a mandatory hash, so `#3` and `#3-#5` are valid while `3` is rejected with a hint.
+
+### What `/ults reload` can and cannot pick up
+
+It re-reads everything the storage works from, but two of those are snapshots the server took when it last loaded its data packs:
+
+| Changed on disk | Picked up by `/ults reload` | Why |
+|-----------------|------------------------------|-----|
+| A loot table — edited **or newly added** to a folder data pack | Yes | Loot tables are listed and opened straight from the resource manager on every reload |
+| A `villager_trade`, or a recipe **file** | Yes | Same |
+| The recipe a **withdrawal** should craft, or a new item in the creative tabs | No, run vanilla `/reload` first | The recipe manager and the creative tabs are snapshots the server only replaces on a data pack reload |
+| A whole new data pack (folder or zip), or an edit inside a zip | No, run vanilla `/reload` or restart | The pack is not in the server's pack list, or the archive was opened once at startup |
+
+So a loot table that starts dropping a new sword makes that sword filterable after `/ults reload` alone, while teaching the storage a brand new recipe needs `/reload` and then `/ults reload`.
 
 ---
 
@@ -82,12 +96,19 @@ config/ults.json
     "permissionLevel": 2,
     "maxBindings": 0,
     "drainInterval": 2,
-    "multiBlockContainers": []
+    "multiBlockContainers": [],
+    "crafting": "DISABLED"
+  },
+  "special": {
+    "maxEntries": 350,
+    "filterLootEquipment": false,
+    "filterMode": "OFF",
+    "filters": []
   }
 }
 ```
 
-A missing file, a missing field or an unknown enum value falls back to the default, and the file is rewritten in canonical form on load. `general.language` and `general.itemVisibility` / `general.storageMode` are applied by `/ults reload`.
+A missing file, a missing field or an unknown enum value falls back to the default, and the file is rewritten in canonical form on load. `general.language` and `general.itemVisibility` / `general.storageMode` are applied by `/ults reload`. `special.maxEntries` is applied as soon as the next stack is stored or the world is loaded again, so lowering it trims the category without waiting for a restart.
 
 ---
 
@@ -111,6 +132,39 @@ A missing file, a missing field or an unknown enum value falls back to the defau
 | `multiBlockContainers`  | `string[]` | Block ids whose connected blocks together form one large container; see below. Empty by default.                                 |
 | `crafting`              | `enum`     | Whether a withdrawal may craft what is missing: `DISABLED`, `SHULKER_BOXES_ONLY` or `ALL`; see below. Disabled by default.       |
 
+### Special Settings
+
+Stacks whose components no creative tab entry describes — anything with a custom name, stored enchantments, a written book — cannot stack with their own kind, so each one takes a row of its own. These settings decide how many such rows the storage keeps and which of them are worth keeping at all; see [Special Data Items](#special-data-items).
+
+| Field                   | Type       | Description                                                                                                                     |
+|-------------------------|------------|---------------------------------------------------------------------------------------------------------------------------------|
+| `maxEntries`            | `int`      | How many special entries (kinds, not pieces) the storage keeps; `0` means none. Defaults to `350`, which is ten pages of the storage screen. Past it the **least recently stored** entry is destroyed as new ones arrive. |
+| `filterLootEquipment`   | `bool`     | Also filter every piece of equipment any loot table can drop — the near identical swords and armour that fill structure chests. Defaults to `false`. Only equipment counts: an item has to carry durability to be one. |
+| `filterMode`            | `enum`     | What the filter does to the items it names: `OFF`, `KEEP_FULL_DURABILITY` or `FILTER_ALL`; see below. Defaults to `OFF`.          |
+| `filters`               | `string[]` | Item ids the filter names itself, on top of the loot table equipment. Namespaces may be omitted and case is folded. Empty by default. |
+
+---
+
+### Special Data Items
+
+A stack that carries data of its own — a named sword, an enchanted book, a written book, anything damaged — stacks with nothing, so it gets a row of its own in **Special Data Items** instead of joining the stack of its plain item. Somewhere to put them is not the same as somewhere to keep them forever, so the category is managed:
+
+- **Newest first.** The category lists the most recently stored entry at the top.
+- **When it arrived.** A special row never shows a craftable amount: what could be made of an item says nothing about one particular named sword. The row shows **when that entry was last stored** instead, and the very same time is what the listing sorts and trims by. Storing the same stack again — a second identical named sword — counts as it arriving again: the two share one row, and that row's time, amount and position all move to the front.
+- **A cap with the least recently stored going first.** Once the category holds more than `special.maxEntries` entries, the ones with the oldest time are destroyed as new ones arrive. The cap counts **kinds, not pieces**: two identically named swords share one entry, so they cost one and refreshing them pushes nothing out. The cap is enforced again when the world loads, so lowering it trims an existing storage.
+- **A filter for what is not worth a row.** Items named in `special.filters`, plus — when `special.filterLootEquipment` is on — every piece of equipment a loot table can drop, are thrown away instead of being stored. `special.filterMode` decides how hard it comes down on them:
+
+| Mode                   | What happens to a filtered special stack                                                            |
+|------------------------|-----------------------------------------------------------------------------------------------------|
+| `OFF`                  | Nothing. The list is not in effect and every special stack is kept. This is the default.             |
+| `KEEP_FULL_DURABILITY` | A pristine one is kept, a worn one is destroyed. A stack that carries no durability counts as pristine. |
+| `FILTER_ALL`           | Destroyed whatever state it is in.                                                                  |
+
+- **Only special stacks are affected.** A plain iron sword stacks with its own kind, so it is never special and the filter never touches it — however its item is listed. The filter only ever sees the stacks that would otherwise take a special row.
+- The filter is applied on the way in, including the contents of an unnamed shulker box being emptied into the storage. Anything it throws away is gone: there is no bin to recover it from.
+- The survival catalogue already walks every loot table, so the equipment list is derived from the same pass and costs nothing extra. In vanilla 26.2 it names 52 items.
+- The Mod Menu screen validates every item id while you type and refuses to save one that names no item of the running game.
+
 ---
 
 ### Automatic Crafting
@@ -129,9 +183,11 @@ With `input.crafting` enabled, a withdrawal that runs short is completed by craf
 - Routes are compared and the best one wins: whichever route produces the most from the current stock, and among those the one needing the fewest operations. A recipe that a stonecutter does in fewer operations is therefore preferred over the crafting table while a stonecutter is stored, and the crafting table takes over when no stonecutter is left.
 - Only the missing part is crafted. Withdrawing 64 of an item while 60 are stored and the recipe produces 4 per operation runs the recipe once and takes the remaining 60 from the stock. What a batch makes on the way and the request does not need, extra planks for example, stays in the storage instead of disappearing.
 - Recipes whose result or ingredients the game decides while it runs (dyeing, fireworks, banner and map copying, repairing, and the like) are not used.
+- **Special data items never show a craftable amount.** Such a row shows when that stack was last stored instead, because what could be made of an item says nothing about one particular named sword. The crafting catalogue is not even asked about them.
 - The empty boxes of a full-box withdrawal are taken in the order **plain boxes in storage, then boxes crafted for the request, and only then the other colours**: a box that can be crafted is never passed over in favour of a coloured one, and when not all of them can be crafted, the colours cover what is left. The screen says how many stored boxes are used and how many are crafted before the confirm button is pressed.
 - The withdrawal screen lists what will be crafted before the confirm button is pressed.
-- `/ults reload` reads the server data again: the recipes used for automatic crafting, the creative tabs and the survival catalogue. Run it after a data pack changed recipes, loot tables or trades, so a new acquisition path counts as survival obtainable without restarting the server.
+- On a very large storage a row's amount may take a moment to appear: a tick only ever spends a short while working craftable amounts out, so the rows a page shows fill in over the next tick or two instead of stalling the server. Once worked out they are remembered until the contents change, and a row that is still waiting keeps the answer its pile's reach gives it rather than disappearing.
+- `/ults reload` reads the server data again: the recipes used for automatic crafting, the creative tabs and the survival catalogue. See [what `/ults reload` can and cannot pick up](#what-ults-reload-can-and-cannot-pick-up) — loot tables and trades follow it alone, a changed recipe needs a vanilla `/reload` first.
 
 ---
 
@@ -148,7 +204,7 @@ In `REMOTE` mode nothing is drained: the bound containers keep their items, so t
 
 - A **named shulker box** goes in as it is, contents and all: the storage never opens it, and it comes back out unchanged. An unnamed box is opened, so what it holds joins the storage and only the empty box is kept.
 - A **named empty box is never used as packaging material** for a full-box withdrawal, even though it is empty: boxes for packing are taken from the unnamed plain boxes, crafted if those run out, and from the other colours only after that.
-- Any stack whose components no creative tab entry describes — a **custom name** on anything, stored enchantments, written books and the like — is listed under **Special Data Items**, which is always reachable in the category pager and shows nothing but the paper while it holds nothing.
+- Any stack whose components no creative tab entry describes — a **custom name** on anything, stored enchantments, written books and the like — is listed under **Special Data Items**, which is always reachable in the category pager and shows nothing but the paper while it holds nothing. That category is capped and can be filtered; see [Special Data Items](#special-data-items).
 
 ---
 
@@ -241,9 +297,9 @@ Look at a container and run `/ults bind`; the note is free text of at most 64 ch
 
 `/ults` opens a 9×6 screen. The left column is the category pager: an up arrow, four category buttons and a down arrow. The next column is a divider, and the remaining 5×7 area shows up to 35 item rows per page. The top row of that area holds the previous-page arrow, a status book and the next-page arrow; while a single page is left, both item arrows are left out completely, because there is nowhere to turn to. The category arrows are always shown.
 
-- **Categories** are the creative tabs discovered when the world loads, plus **All Items** and **Special Data Items** (stored stacks whose components no creative tab describes). Tabs that hold nothing listable in the current visibility mode are hidden, while **All Items** and **Special Data Items** always stay reachable, even while they are empty. A list without a single row shows a paper in the middle of the item area instead.
-- **Status book** shows the selected category, the category page, the item page, how many item types are listed and stored, the current filter and the current visibility; left-clicking it opens the **filter screen**, where a part of an item id (for example `diamond`) is typed, applied, or cleared, and right-clicking it switches the visibility mode this player sees.
-- **Item rows** show the stored amount, the equivalent in shulker boxes once it reaches a box, and open the **withdrawal screen** on a left click while something is stored or automatic crafting could make the item right now.
+- **Categories** are the creative tabs discovered when the world loads, plus **All Items** and **Special Data Items** (stored stacks whose components no creative tab describes). Tabs that hold nothing listable in the current visibility mode are hidden, while **All Items** and **Special Data Items** always stay reachable, even while they are empty. A list without a single row shows a paper in the middle of the item area instead. The special rows are listed newest first, in both the special category and the tail of **All Items**.
+- **Status book** shows the selected category, the category page, the item page, how many item types are listed and stored, how many special entries are held out of the cap and how many pages those are, the current filter and the current visibility; left-clicking it opens the **filter screen**, where a part of an item id (for example `diamond`) is typed, applied, or cleared, and right-clicking it switches the visibility mode this player sees. The special count turns red once the cap is reached, which is when a new special stack starts destroying the oldest one.
+- **Item rows** show the stored amount, the equivalent in shulker boxes once it reaches a box, and open the **withdrawal screen** on a left click while something is stored or automatic crafting could make the item right now. A special row shows **when that stack was last stored** in place of a craftable amount, and is openable whenever something is stored.
 - The selected category, category page, item page, filter and visibility are saved per player in the world data, so everyone returns to their own view.
 - Clicking plays a short sound that only the clicking player hears: a light click for opening, paging, selecting and switching, and a brighter pickup sound for applying or confirming. Cancelling a screen stays silent.
 - Open screens refresh themselves when stored quantities change.
@@ -265,7 +321,7 @@ The filter screen uses the same three slots: cancel, clear the filter, and apply
 
 ## Highlights & Protection
 
-`/ults show` and `/ults hide` toggle **your own** highlight; other players are unaffected. Within 48 blocks, at most 16 bound containers are outlined with a glowing outline that follows the block exactly, refreshed twice per second. While you look at a bound container, the action bar names its binding, for example `Binding #3 (north warehouse)`.
+`/ults show` and `/ults hide` toggle **your own** highlight and need the same permission as binding and deleting; other players are unaffected. Within 48 blocks, at most 16 bound containers are outlined with a glowing outline that follows the block exactly, refreshed twice per second. While you look at a bound container, the action bar names its binding, for example `Binding #3 (north warehouse)`.
 
 Bound blocks are protected: breaking one requires sneaking. A normal break attempt is cancelled and answered with `This container is bound to the storage: sneak to break it.` (at most once every two seconds per player). Sneaking through a break removes the binding and tells you which one it was, and a bound block that disappears for other reasons loses its binding automatically.
 
@@ -273,13 +329,13 @@ Bound blocks are protected: breaking one requires sneaking. A normal break attem
 
 ## World Data
 
-Bindings and per-player view profiles are stored in the overworld `SavedData` of the world, so **each world has its own storage** and copying a world copies its storage. Nothing is written into container or player NBT. In `VOID` mode the stored items live in that same world data; in `REMOTE` mode they stay where they are, inside the bound containers.
+Bindings and per-player view profiles are stored in the overworld `SavedData` of the world, so **each world has its own storage** and copying a world copies its storage. Nothing is written into container or player NBT. In `VOID` mode the stored items live in that same world data; in `REMOTE` mode they stay where they are, inside the bound containers. Every stored kind also remembers when it was last put in, which is what the special category sorts, displays and trims by; a save written before that stamp existed still loads, its entries simply count as the oldest.
 
 ---
 
 ## Cloth Config Support
 
-With **Cloth Config API** and **Mod Menu** installed on a client, every setting can be changed in-game. The screen edits only that client's local `config/ults.json`; it cannot modify a remote dedicated server. Saving validates and atomically writes UTF-8 JSON, and a block id that names no block of the running game is highlighted while typing and blocks the save. Run `/ults reload` on an integrated server to apply the file.
+With **Cloth Config API** and **Mod Menu** installed on a client, every setting can be changed in-game. The screen is split into **General**, **Storage** and **Special items** tabs, each mirrored inside an **All** overview. The screen edits only that client's local `config/ults.json`; it cannot modify a remote dedicated server. Saving validates and atomically writes UTF-8 JSON, and a block id or item id that names nothing in the running game is highlighted while typing and blocks the save. The item filter list is edited with the same numbered, validating list widget the multi block container list uses. Run `/ults reload` on an integrated server to apply the file.
 
 ---
 
