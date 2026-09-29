@@ -2,6 +2,7 @@ package com.flwolfy.ults.display;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -9,13 +10,17 @@ import com.flwolfy.ults.crafting.UltsTestBootstrap;
 import com.flwolfy.ults.data.config.UltsItemVisibility;
 import com.flwolfy.ults.data.lang.UltsItemNames;
 import com.flwolfy.ults.data.state.UltsStoredView;
+import com.flwolfy.ults.util.UltsTextBuilder;
 import java.util.List;
 import java.util.Map;
+import net.minecraft.ChatFormatting;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.TextColor;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.item.Rarity;
 import net.minecraft.world.item.component.ItemLore;
 import org.junit.jupiter.api.Test;
 
@@ -126,6 +131,51 @@ class UltsStorageSGuiTest {
         UltsStorageSGUI.keptInBag(group, "锋利", "zh_cn"));
     assertEquals(2, UltsStorageSGUI.keptInBag(group, "锋利", "zh_cn"));
     assertEquals(0, UltsStorageSGUI.keptInBag(group, "南瓜", "zh_cn"));
+  }
+
+  @Test
+  void theBagRowNamesItsItemInThatItemsOwnRarityColour() {
+    UltsTestBootstrap.boot();
+    // The item's name inside the title is drawn the way the game draws that item's name anywhere else: in
+    // the colour of its rarity. The bag's own words keep the bag's colour, which is a different thing.
+    assertEquals(Rarity.COMMON.color(), UltsStorageSGUI.nameColour(Items.DIAMOND_SWORD));
+
+    // And it is the *item's* rarity, not the newest stack's: the title names the kind of thing the bag
+    // holds, which does not change because the stack that arrived last happens to be enchanted or to carry
+    // a rarity of its own.
+    ItemStack dressed = new ItemStack(Items.DIAMOND_SWORD);
+    dressed.set(DataComponents.RARITY, Rarity.EPIC);
+    assertEquals(Rarity.EPIC, dressed.getRarity());
+    assertEquals(Rarity.COMMON.color(), UltsStorageSGUI.nameColour(dressed.getItem()));
+  }
+
+  @Test
+  void theBagRowTitleWearsAColourNothingElseOnTheRowCanBe() {
+    // The title is the row's identity; the lines under it are what the row reports. A title drawn in one of
+    // the colours those facts are drawn in reads as another fact about the stack rather than as the bag's
+    // name — green did exactly that, because every number the row reports is green and a weapon's own
+    // attribute lines are dark green — so the bag's own colour is kept outside all of them.
+    int title = UltsStorageSGUI.TITLE_COLOUR.getValue();
+    assertNotEquals(rgb(UltsTextBuilder.TEXT), title);
+    assertNotEquals(rgb(UltsTextBuilder.HIGHLIGHT), title);
+    assertNotEquals(rgb(UltsTextBuilder.SHADE), title);
+    assertNotEquals(rgb(ChatFormatting.DARK_GREEN), title);
+
+    // And outside the colours a stack's own name can be, which are the four rarities': a pink that was one
+    // of them would put the bag's name and the stack's name in the same colour on the rows that matter
+    // most, which is what the bag's words were given a colour of their own to avoid. The item's name inside
+    // the brackets is not the bag's words, and is drawn in its rarity's colour on purpose.
+    for (Rarity rarity : Rarity.values()) {
+      assertNotEquals(rgb(rarity.color()), title,
+          "the bag's colour is not the colour the " + rarity + " rarity paints a name with");
+    }
+    // The line itself is built through the server's language manager, which only a running game has, so
+    // what a test can hold the row to is the colours its title is built from.
+  }
+
+  /** The colour a named colour really draws in. */
+  private static int rgb(ChatFormatting colour) {
+    return TextColor.fromLegacyFormat(colour).getValue();
   }
 
   private static ItemStack named(Item item, String name) {

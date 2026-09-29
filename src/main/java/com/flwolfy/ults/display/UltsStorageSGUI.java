@@ -31,6 +31,8 @@ import net.minecraft.ChatFormatting;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.MutableComponent;
+import net.minecraft.network.chat.TextColor;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.player.Player;
@@ -52,13 +54,21 @@ public final class UltsStorageSGUI extends SimpleGui {
   private static final int STATUS_SLOT = 5;
   private static final int NEXT_PAGE_SLOT = 8;
   /**
-   * The colour of a bag row's title.
+   * The colour of a bag row's title: a bright pink of the mod's own, not one of the game's named colours.
    *
-   * <p>Green because it is the one bright colour the name of the stack underneath can never be: the game
-   * paints that one from the stack's rarity, so it is always white, yellow, aqua or light purple. A row
-   * whose title shares its colour with the name under it reads as one name written twice.
+   * <p>It has to be a colour nothing else on the row is drawn in, or the bag's name reads as one more fact
+   * about the stack rather than as the name of the row. Every colour the row uses is therefore spoken for:
+   * yellow for the label, the rule and every other label, green for every number, dark green for the lines
+   * the game writes about a weapon, grey for the hint. Green was tried as the title's colour and failed
+   * exactly that way — the block under the title is full of greens, so the title read as another number.
+   *
+   * <p>The game's own colours are spoken for as well, by the name of the stack underneath: it is painted
+   * from the stack's rarity, which is white, yellow, aqua or light purple and nothing else. A named pink
+   * would be the light purple an epic stack already wears, so the pink is mixed here instead:
+   * {@code #FF88CC}, redder and softer than that purple, and not a colour any vanilla text uses.
    */
-  private static final ChatFormatting TITLE_COLOUR = ChatFormatting.GREEN;
+  static final TextColor TITLE_COLOUR = TextColor.fromRgb(0xFF88CC);
+
   private static final int[] CONTENT_SLOTS = {
       11, 12, 13, 14, 15, 16, 17,
       20, 21, 22, 23, 24, 25, 26,
@@ -908,11 +918,47 @@ public final class UltsStorageSGUI extends SimpleGui {
 
     ItemStack icon = newest.copyWithCount(1);
     GuiElementBuilder bag = new GuiElementBuilder(icon)
-        .setName(UltsGuiText.text("ults.gui.bag.title", newest.getItem().getName(newest))
-            .withStyle(TITLE_COLOUR))
+        .setName(bagTitle(newest))
         .setLore(lines)
         .hideDefaultTooltip();
     return UltsTakeHints.bagHints(bag, "ults.gui.take.bag");
+  }
+
+  /**
+   * The title of a bag row: which item the bag holds, in brackets, with the word for a bag after it.
+   *
+   * <p>Two colours meet on this line, and they mean two different things. The item's own name is drawn the
+   * way the game draws the name of that item anywhere else — in its rarity's colour — so a bag of rare
+   * things says so in the same words and the same colour a hover would. The bag's own words, the brackets
+   * and the name of the bag, keep the bag's colour instead.
+   *
+   * <p>The rarity here is the <em>item's</em>, not the newest stack's: the title names the kind of thing the
+   * bag holds, which does not change because the stack that arrived last happens to be enchanted. The
+   * game's own name line, the one under this in the row's body, is the stack's, and that one does follow
+   * the stack.
+   *
+   * @param newest the newest stack in the bag, whose item is what the title names
+   * @return the line, ready to be drawn
+   */
+  static MutableComponent bagTitle(ItemStack newest) {
+    Item item = newest.getItem();
+    Component named = item.getName(newest).copy().withStyle(nameColour(item));
+    return UltsGuiText.text("ults.gui.bag.title", named).withColor(TITLE_COLOUR);
+  }
+
+  /**
+   * The colour the name of an item is drawn in: its own rarity's, which is the colour the game paints that
+   * item's name with wherever it is shown.
+   *
+   * <p>It is asked of the item's own stack rather than of the one at hand, so an enchanted stack — whose
+   * rarity the game raises a step, and which therefore wears a brighter colour than its item does — does
+   * not change the colour a bag row names its kind of thing in.
+   *
+   * @param item the item whose name is being drawn
+   * @return the colour that name belongs in
+   */
+  static ChatFormatting nameColour(Item item) {
+    return item.getDefaultInstance().getRarity().color();
   }
 
   /**
