@@ -107,19 +107,23 @@ final class UltsTakeHints {
   /**
    * The keys of the lines a row of a listing shows, in the order they are drawn.
    *
+   * <p>The line about taking everything is left out while the configuration does not allow it: an offer a
+   * click cannot keep is not an offer, and a server that turns it off should not have its rows keep
+   * mentioning it.
+   *
    * @param right the key of what a right click offers, which every row words for itself
    * @param boxPossible whether a whole box could be packed right now
-   * @param shiftClicks whether the row answers shift clicks at all
+   * @param takeAll whether the configuration allows taking everything at all
    * @return the keys, in the order they are drawn
    */
-  static List<String> lines(String right, boolean boxPossible, boolean shiftClicks) {
+  static List<String> lines(String right, boolean boxPossible, boolean takeAll) {
     List<String> lines = new ArrayList<>(4);
     lines.add(TAKE);
     lines.add(right);
-    if (shiftClicks) {
-      if (boxPossible) {
-        lines.add(SHIFT_BOX);
-      }
+    if (boxPossible) {
+      lines.add(SHIFT_BOX);
+    }
+    if (takeAll) {
       lines.add(SHIFT_ALL);
     }
     return List.copyOf(lines);
@@ -146,7 +150,7 @@ final class UltsTakeHints {
    * @param obtainable how much of it the storage holds or could craft
    * @param right the key of what a right click offers, which every row words for itself
    * @param boxPossible whether a whole box could be packed right now
-   * @param shiftClicks whether the row answers shift clicks at all
+   * @param takeAll whether the configuration allows taking everything at all
    * @return the same row, for chaining
    */
   static GuiElementBuilder hints(
@@ -155,10 +159,10 @@ final class UltsTakeHints {
       long obtainable,
       String right,
       boolean boxPossible,
-      boolean shiftClicks
+      boolean takeAll
   ) {
     String taken = UltsGuiText.format(takenByLeftClick(obtainable, template.getMaxStackSize()));
-    for (String key : lines(right, boxPossible, shiftClicks)) {
+    for (String key : lines(right, boxPossible, takeAll)) {
       builder.addLoreLine(TAKE.equals(key)
           ? UltsGuiText.text(key, taken).copy().withStyle(ChatFormatting.GRAY)
           : line(key));

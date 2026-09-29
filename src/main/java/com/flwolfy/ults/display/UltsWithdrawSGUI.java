@@ -52,14 +52,17 @@ public final class UltsWithdrawSGUI extends UltsAnvilInputGui {
    * Opens the amount screen and says where leaving it goes.
    *
    * @param returnTo what to open once this screen is done with, which is the screen it came from
+   * @return the screen that was opened, so a caller can look at what it says
    */
-  public static void open(
+  public static UltsWithdrawSGUI open(
       ServerPlayer player,
       UltsRuntime runtime,
       ItemStack template,
       Runnable returnTo
   ) {
-    new UltsWithdrawSGUI(player, runtime, template, returnTo).open();
+    UltsWithdrawSGUI screen = new UltsWithdrawSGUI(player, runtime, template, returnTo);
+    screen.open();
+    return screen;
   }
 
   public static void refreshAll(UltsRuntime runtime) {
@@ -100,7 +103,12 @@ public final class UltsWithdrawSGUI extends UltsAnvilInputGui {
 
     ItemStack availableBox = runtime.availableBox();
     ItemStack boxIcon = availableBox.isEmpty() ? new ItemStack(Items.SHULKER_BOX) : availableBox;
-    GuiElementBuilder mode = new GuiElementBuilder(boxed ? boxIcon : template.copyWithCount(1))
+    // The mode slot glints while it stands for the item itself and not while it stands for a box: the
+    // glint is what says "this is the thing you are taking", and a box to pack it in is not that.
+    GuiElementBuilder mode = boxed
+        ? new GuiElementBuilder(boxIcon).hideDefaultTooltip()
+        : new GuiElementBuilder(template.copyWithCount(1)).hideDefaultTooltip().glow();
+    mode
         .setName(UltsGuiText.text(boxed ? "ults.withdraw.mode.box" : "ults.withdraw.mode.item")
             .copy().withStyle(ChatFormatting.YELLOW))
         .addLoreLine(template.getHoverName().copy().withStyle(UltsTextBuilder.HIGHLIGHT))
@@ -211,37 +219,21 @@ public final class UltsWithdrawSGUI extends UltsAnvilInputGui {
 
   /** Whether the backpack can take the whole result, which the special bag asks as well. */
   static boolean canFit(ServerPlayer player, List<ItemStack> outputs) {
-    List<ItemStack> slots = new ArrayList<>(36);
-    for (int slot = 0; slot < 36; slot++) {
-      slots.add(player.getInventory().getItem(slot).copy());
-    }
-    for (ItemStack requested : outputs) {
-      ItemStack remaining = requested.copy();
-      for (ItemStack current : slots) {
-        if (remaining.isEmpty()) {
-          break;
-        }
-        if (ItemStack.isSameItemSameComponents(current, remaining)
-            && current.getCount() < current.getMaxStackSize()) {
-          int moved = Math.min(
-              remaining.getCount(), current.getMaxStackSize() - current.getCount());
-          current.grow(moved);
-          remaining.shrink(moved);
-        }
-      }
-      for (int slot = 0; slot < slots.size() && !remaining.isEmpty(); slot++) {
-        if (!slots.get(slot).isEmpty()) {
-          continue;
-        }
-        int moved = Math.min(remaining.getCount(), remaining.getMaxStackSize());
-        slots.set(slot, remaining.copyWithCount(moved));
-        remaining.shrink(moved);
-      }
-      if (!remaining.isEmpty()) {
-        return false;
-      }
-    }
-    return true;
+    return UltsBackpack.fitting(UltsBackpack.slots(player), outputs) == outputs.size();
+  }
+
+  /**
+   * How many more pieces of one stack the backpack can take as it stands.
+   *
+   * <p>Room left in stacks of the same thing counts the same as an empty slot, which is how the game
+   * itself fills a backpack: a stack is topped up before a new slot is opened.
+   *
+   * @param player the player receiving
+   * @param template what would be handed over, one piece of it
+   * @return how many pieces fit right now
+   */
+  static long room(ServerPlayer player, ItemStack template) {
+    return UltsBackpack.room(UltsBackpack.slots(player), template);
   }
 
   private static Integer parse(String value) {

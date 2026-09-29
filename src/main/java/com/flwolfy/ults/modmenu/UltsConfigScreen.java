@@ -59,6 +59,9 @@ public final class UltsConfigScreen {
     Field<Integer> drainInterval = new Field<>(current.input().drainInterval());
     Field<UltsCraftingMode> crafting = new Field<>(current.input().crafting());
     Field<Boolean> allowFullInventory = new Field<>(current.input().allowFullInventory());
+    Field<Boolean> allowTakeAll = new Field<>(current.input().allowTakeAll());
+    Field<Integer> takeAllStacks = new Field<>(current.input().takeAllStacks());
+    Field<Integer> takeAllRate = new Field<>(current.input().takeAllRate());
     Field<Integer> bundleSlots = new Field<>(current.special().bundleSlots());
     Field<UltsStackRule> stackRule = new Field<>(current.special().stackRule());
     Field<UltsSpecialFilter> filterMode = new Field<>(current.special().filterMode());
@@ -85,6 +88,9 @@ public final class UltsConfigScreen {
         drainEntry(entries, drainInterval),
         craftingEntry(entries, crafting),
         fullInventoryEntry(entries, allowFullInventory),
+        allowTakeAllEntry(entries, allowTakeAll),
+        takeAllStacksEntry(entries, takeAllStacks),
+        takeAllRateEntry(entries, takeAllRate),
         idListEntry(entries, "multi_block_containers", multiBlock, false)
     );
     List<AbstractConfigListEntry<?>> specialEntries = List.of(
@@ -105,6 +111,9 @@ public final class UltsConfigScreen {
         drainEntry(entries, drainInterval),
         craftingEntry(entries, crafting),
         fullInventoryEntry(entries, allowFullInventory),
+        allowTakeAllEntry(entries, allowTakeAll),
+        takeAllStacksEntry(entries, takeAllStacks),
+        takeAllRateEntry(entries, takeAllRate),
         idListEntry(entries, "multi_block_containers", multiBlock, true)
     );
     List<AbstractConfigListEntry<?>> specialOverview = List.of(
@@ -133,7 +142,10 @@ public final class UltsConfigScreen {
               drainInterval.resolve(),
               multiBlock.values(),
               crafting.resolve(),
-              allowFullInventory.resolve()
+              allowFullInventory.resolve(),
+              allowTakeAll.resolve(),
+              takeAllStacks.resolve(),
+              takeAllRate.resolve()
           ),
           new UltsConfigData.Special(
               bundleSlots.resolve(),
@@ -279,6 +291,61 @@ public final class UltsConfigScreen {
             Component.translatable(KEY + "allow_full_inventory"), field.initial())
         .setDefaultValue(UltsConfigData.DEFAULT.input().allowFullInventory())
         .setTooltip(Component.translatable(KEY + "allow_full_inventory.tooltip"))
+        .build();
+    return field.track(entry);
+  }
+
+  /**
+   * Whether players may empty a stock out with "take everything" at all.
+   *
+   * <p>With it off the offer is not there: the hint on a row and on a bag's status book leaves the line
+   * out, and the clicks that would start one do nothing, so nothing about taking everything is shown.
+   */
+  private static AbstractConfigListEntry<?> allowTakeAllEntry(
+      ConfigEntryBuilder entries,
+      Field<Boolean> field
+  ) {
+    AbstractConfigListEntry<Boolean> entry = entries.startBooleanToggle(
+            Component.translatable(KEY + "allow_take_all"), field.initial())
+        .setDefaultValue(UltsConfigData.DEFAULT.input().allowTakeAll())
+        .setTooltip(Component.translatable(KEY + "allow_take_all.tooltip"))
+        .build();
+    return field.track(entry);
+  }
+
+  /**
+   * How many stacks one take-everything takes at most.
+   *
+   * <p>It is a count of stacks, not of items, because that is the unit the storage and a backpack both
+   * think in; the tooltip spells out what one stack is worth for a thing that does not stack.
+   */
+  private static AbstractConfigListEntry<?> takeAllStacksEntry(
+      ConfigEntryBuilder entries,
+      Field<Integer> field
+  ) {
+    AbstractConfigListEntry<Integer> entry = entries.startIntField(
+            Component.translatable(KEY + "take_all_stacks"), field.initial())
+        .setDefaultValue(UltsConfigData.DEFAULT.input().takeAllStacks())
+        .setMin(1)
+        .setMax(UltsConfigData.MAX_TAKE_ALL_STACKS)
+        .setTooltip(Component.translatable(
+            KEY + "take_all_stacks.tooltip", UltsConfigData.DEFAULT_TAKE_ALL_STACKS))
+        .build();
+    return field.track(entry);
+  }
+
+  /** How many items one take-everything hands over per tick while it runs. */
+  private static AbstractConfigListEntry<?> takeAllRateEntry(
+      ConfigEntryBuilder entries,
+      Field<Integer> field
+  ) {
+    AbstractConfigListEntry<Integer> entry = entries.startIntField(
+            Component.translatable(KEY + "take_all_rate"), field.initial())
+        .setDefaultValue(UltsConfigData.DEFAULT.input().takeAllRate())
+        .setMin(1)
+        .setMax(UltsConfigData.MAX_TAKE_ALL_RATE)
+        .setTooltip(Component.translatable(
+            KEY + "take_all_rate.tooltip", UltsConfigData.DEFAULT_TAKE_ALL_RATE))
         .build();
     return field.track(entry);
   }

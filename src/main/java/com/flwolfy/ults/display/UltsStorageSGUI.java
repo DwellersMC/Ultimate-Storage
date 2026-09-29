@@ -40,7 +40,6 @@ import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.ItemStackTemplate;
 import net.minecraft.world.item.Items;
-import net.minecraft.world.item.Rarity;
 import net.minecraft.world.item.component.BundleContents;
 
 public final class UltsStorageSGUI extends SimpleGui {
@@ -52,6 +51,14 @@ public final class UltsStorageSGUI extends SimpleGui {
   private static final int PREVIOUS_PAGE_SLOT = 2;
   private static final int STATUS_SLOT = 5;
   private static final int NEXT_PAGE_SLOT = 8;
+  /**
+   * The colour of a bag row's title.
+   *
+   * <p>Green because it is the one bright colour the name of the stack underneath can never be: the game
+   * paints that one from the stack's rarity, so it is always white, yellow, aqua or light purple. A row
+   * whose title shares its colour with the name under it reads as one name written twice.
+   */
+  private static final ChatFormatting TITLE_COLOUR = ChatFormatting.GREEN;
   private static final int[] CONTENT_SLOTS = {
       11, 12, 13, 14, 15, 16, 17,
       20, 21, 22, 23, 24, 25, 26,
@@ -90,8 +97,17 @@ public final class UltsStorageSGUI extends SimpleGui {
     render();
   }
 
-  public static void open(ServerPlayer player, UltsRuntime runtime) {
-    new UltsStorageSGUI(player, runtime).open();
+  /**
+   * Opens the listing for a player.
+   *
+   * @param player the player looking at their storage
+   * @param runtime the storage
+   * @return the screen that was opened, so a caller can look at what it says
+   */
+  public static UltsStorageSGUI open(ServerPlayer player, UltsRuntime runtime) {
+    UltsStorageSGUI screen = new UltsStorageSGUI(player, runtime);
+    screen.open();
+    return screen;
   }
 
   public static void refreshAll(UltsRuntime runtime) {
@@ -194,7 +210,7 @@ public final class UltsStorageSGUI extends SimpleGui {
           "ults.gui.page", itemPage + 1, itemPages));
     }
     setSlot(STATUS_SLOT, statusButton(
-        selectedIndex, categories.size(), items, stored, bags,
+        selectedIndex, categories.size(), items, stored,
         categoryPage, categoryPages, itemPages));
     saveView();
   }
@@ -590,8 +606,9 @@ public final class UltsStorageSGUI extends SimpleGui {
     // exact amount is still being worked out for a later tick.
     long obtainable = amount + craftable;
     if (obtainable > 0 || runtime.craftableNow(template, stock)) {
+      boolean takeAll = runtime.allowTakeAll();
       UltsTakeHints.hints(builder, template, obtainable, "ults.gui.take.choose",
-          UltsTakeHints.boxPossible(runtime, template, stock, obtainable, boxInStock), true);
+          UltsTakeHints.boxPossible(runtime, template, stock, obtainable, boxInStock), takeAll);
       builder.setCallback((slot, type, action, gui) -> {
         if (type == ClickType.MOUSE_LEFT) {
           takeOneStack(template);
@@ -602,7 +619,9 @@ public final class UltsStorageSGUI extends SimpleGui {
           // piece: the screen says what there is and only hands over what is confirmed.
           UltsGuiSound.click(player);
           UltsWithdrawSGUI.open(player, runtime, template);
-        } else if (type == ClickType.MOUSE_RIGHT_SHIFT) {
+        } else if (type == ClickType.MOUSE_RIGHT_SHIFT && takeAll) {
+          // A server that does not allow taking everything answers this click with nothing at all — no
+          // screen, no sound and no message, because nothing here is offered.
           UltsGuiSound.click(player);
           UltsTakeAllSGUI.openForItem(
               player, runtime, template, () -> UltsStorageSGUI.open(player, runtime));
@@ -681,23 +700,24 @@ public final class UltsStorageSGUI extends SimpleGui {
     return UltsRuntime.storedAmount(template, stock);
   }
 
+  /**
+   * The book and quill that says what the listing is showing.
+   *
+   * <p>It answers for the listing itself: which category, which page of it, how many pages of items there
+   * are, how many kinds are listed and how many of those are really in stock, and what the visibility
+   * setting and the search are. What the storage holds of the special items is not part of that, so the
+   * book says nothing about bags.
+   */
   private GuiElementBuilder statusButton(
       int selectedIndex,
       int categoryCount,
       List<UltsStoredView> items,
       List<UltsStoredView> stock,
-      Map<Item, List<UltsStoredView>> bags,
       int categoryPage,
       int categoryPages,
       int itemPages
   ) {
     long stocked = items.stream().filter(view -> view.amount() > 0).count();
-    int slots = UltsConfigManager.getInstance().data().special().bundleSlots();
-    List<Integer> sizes = bags.values().stream()
-        .map(List::size)
-        .filter(size -> size > 1)
-        .toList();
-    int fullest = sizes.stream().mapToInt(Integer::intValue).max().orElse(0);
     GuiElementBuilder builder = element(Items.WRITABLE_BOOK)
         .setName(UltsGuiText.text("ults.gui.status").copy().withStyle(ChatFormatting.YELLOW))
         .addLoreLine(UltsGuiText.labelled(
@@ -718,14 +738,6 @@ public final class UltsStorageSGUI extends SimpleGui {
             "ults.gui.types", "ults.gui.types.suffix", items.size(), false))
         .addLoreLine(UltsGuiText.labelled(
             "ults.gui.types.stored", "ults.gui.types.stored.suffix", stocked, false))
-        .addLoreLine(UltsGuiText.labelled(
-            "ults.gui.status.special", sizes.size(), false))
-        .addLoreLine(UltsGuiText.labelled(
-            "ults.gui.status.special.pages",
-            fullest + " / " + slots
-                + "  (" + UltsConfigData.pagesOf(fullest) + " / "
-                + UltsConfigData.pagesOf(slots) + ")",
-            fullest >= slots))
         .addLoreLine(UltsGuiText.labelled(
             "ults.gui.visibility",
             UltsGuiText.text("ults.config.item_visibility."
@@ -846,13 +858,15 @@ public final class UltsStorageSGUI extends SimpleGui {
    * It is built from the item's own name component rather than from finished words, so the client draws
    * it in the language that client is set to.
    *
-   * <p>That first line is coloured by the game itself, which paints it by the item's rarity and drops
-   * whatever style was set on it — and it raises the rarity of anything enchanted, so a title styled
-   * yellow comes out aqua on a cursed item and white on a plain one. The icon is therefore the newest
-   * stack with its enchantments taken off and the rarity set to the one whose colour <em>is</em> yellow;
-   * the enchantments are still drawn, from the row's own lines, and the glint they gave it is asked for
-   * by hand in their place. Nothing else about the icon changes — it is a display copy, and what the row
-   * hands over on a click is the stored stack itself.
+   * <p>The title is coloured here, in green, so that it can never be mistaken for the name of the stack
+   * under it: the game paints that one from the stack's rarity, which is white, yellow, aqua or light
+   * purple and nothing else. Green is the one bright colour none of those four can be. The game wraps the
+   * name in a rarity colour of its own before drawing it — the wrapper is what used to show through — but a
+   * colour set on the name itself wins over the wrapper, so the row states its own colour rather than
+   * borrowing the one its rarity happens to carry.
+   *
+   * <p>The icon is the newest stack as it is, glint and all: nothing about it is altered for the row, and
+   * what the row hands over on a click is the stored stack itself.
    *
    * <p>Under the closing rule come the bag's own facts — how many stacks it holds, or, while a search is
    * on, how many of them that search kept, which is the number opening the bag will lay out and is worked
@@ -893,17 +907,9 @@ public final class UltsStorageSGUI extends SimpleGui {
         "ults.gui.special.updated", UltsGuiText.stamp(view.updatedAt()), !view.stampKnown()));
 
     ItemStack icon = newest.copyWithCount(1);
-    // Asked before the enchantments come off, because that is what the glint is drawn from: the game's own
-    // answer for this stack, which knows an enchanted book and a brew as well as it knows a sword.
-    boolean glinting = icon.hasFoil();
-    icon.remove(DataComponents.ENCHANTMENTS);
-    icon.remove(DataComponents.STORED_ENCHANTMENTS);
-    if (glinting) {
-      icon.set(DataComponents.ENCHANTMENT_GLINT_OVERRIDE, true);
-    }
     GuiElementBuilder bag = new GuiElementBuilder(icon)
-        .setRarity(Rarity.UNCOMMON)
-        .setName(UltsGuiText.text("ults.gui.bag.title", newest.getItem().getName(newest)))
+        .setName(UltsGuiText.text("ults.gui.bag.title", newest.getItem().getName(newest))
+            .withStyle(TITLE_COLOUR))
         .setLore(lines)
         .hideDefaultTooltip();
     return UltsTakeHints.bagHints(bag, "ults.gui.take.bag");

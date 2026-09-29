@@ -14,9 +14,11 @@ public final class UltsTextBuilder {
    * (positions, numbers, notes) and red marks anything that failed. Grey is only used for inactive
    * or placeholder text, never for the body.
    */
-  public static final ChatFormatting INFO = ChatFormatting.YELLOW;
-  public static final ChatFormatting SUCCESS = ChatFormatting.YELLOW;
-  public static final ChatFormatting FAILURE = ChatFormatting.RED;
+  public static ChatFormatting INFO = ChatFormatting.YELLOW;
+  public static ChatFormatting SUCCESS = ChatFormatting.YELLOW;
+  public static ChatFormatting FAILURE = ChatFormatting.RED;
+  /** Something finished the way it was meant to: the one place green means "done", not a value. */
+  public static final ChatFormatting DONE = ChatFormatting.GREEN;
 
   public static final ChatFormatting TEXT = ChatFormatting.YELLOW;
   public static final ChatFormatting HIGHLIGHT = ChatFormatting.GREEN;
@@ -34,6 +36,11 @@ public final class UltsTextBuilder {
 
   public static Component failure(Component text) {
     return text.copy().withStyle(FAILURE);
+  }
+
+  /** Something that finished: green, so a player reading the chat sees it at a glance. */
+  public static Component done(Component text) {
+    return text.copy().withStyle(DONE);
   }
 
   /**

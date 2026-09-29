@@ -3,6 +3,7 @@ package com.flwolfy.ults.display;
 import com.flwolfy.ults.UltsRuntime;
 import java.util.List;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.item.ItemStack;
 
 /**
@@ -40,12 +41,37 @@ final class UltsGuiGive {
         continue;
       }
       if (overflowToGround || runtime.remote()) {
-        player.drop(output, false);
-        dropped = true;
+        dropped |= drop(player, runtime, output);
       } else {
         runtime.state().deposit(output);
       }
     }
     return dropped;
+  }
+
+  /**
+   * Puts one stack down at a player's feet, and keeps it if the world will not take it.
+   *
+   * <p>The game's own drop asks the level to add the item entity and then ignores the answer, so a stack
+   * the level refused is a stack nobody will ever see again — which is what a player reports as items
+   * vanishing when their backpack is full. The answer is therefore read here: a stack that did not land
+   * goes back into the storage instead of out of the world.
+   *
+   * @param player the player dropping it, at whose feet it lands
+   * @param runtime the storage it came from, to hand it back to
+   * @param stack the stack to put down, which this call takes over
+   * @return whether it really landed
+   */
+  static boolean drop(ServerPlayer player, UltsRuntime runtime, ItemStack stack) {
+    ItemEntity entity = new ItemEntity(
+        player.level(), player.getX(), player.getEyeY() - 0.3, player.getZ(), stack.copy());
+    entity.setPickUpDelay(40);
+    if (player.level().addFreshEntity(entity)) {
+      stack.setCount(0);
+      return true;
+    }
+    runtime.state().deposit(stack);
+    stack.setCount(0);
+    return false;
   }
 }

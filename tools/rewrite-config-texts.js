@@ -152,7 +152,7 @@ const texts = {
     'ults.config.crafting.shulker_boxes_only': '只合成界伏盒',
     'ults.config.crafting.all': '全部允許',
     'ults.config.allow_full_inventory': '背包放不下也允許取出',
-    'ults.config.allow_full_inventory.tooltip': '背包装不下這次取出的全部結果時，是否仍然允許取出。\n\n開啟 —— 放不下的部分作為掉落物掉在腳下，背包塞滿也能把庫存清空。\n關閉 —— 取出介面直接拒絕這次請求。',
+    'ults.config.allow_full_inventory.tooltip': '背包裝不下這次取出的全部結果時，是否仍然允許取出。\n\n開啟 —— 放不下的部分作為掉落物掉在腳下，背包塞滿也能把庫存清空。\n關閉 —— 取出介面直接拒絕這次請求。',
     'ults.config.special_stack_rule': '可堆疊條件',
     'ults.config.special_stack_rule.tooltip': '同一種物品的兩堆在什麼情況下算同一種東西，也就是能不能合併成一列。\n\n物品與名稱是兩種模式共同的前提：普通劍和附魔劍是兩種，兩把不同名稱的劍也是。\n\n元件全同 —— 所有元件都必須一致，包括耐久度；這正是遊戲自己判斷兩堆能否互換的標準，交還給玩家的永遠是被存進去的那一堆。\ntooltip 相同 —— 玩家讀到的內容一致即可：磨損程度不同的兩把劍會合併，而魔咒不同的永遠不會。交還的是「這一類」的堆疊，不一定是最初放進去的那一堆。\n\n所有分類裡比較兩堆的地方都用這條規則。',
     'ults.config.special_stack_rule.value.components': '元件全同',

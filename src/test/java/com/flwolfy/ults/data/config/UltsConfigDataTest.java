@@ -33,16 +33,30 @@ class UltsConfigDataTest {
     UltsConfigData data = new UltsConfigData(
         UltsConfigData.DEFAULT.general(),
         new UltsConfigData.Input(
-            3, 0, 7, List.of("modid:Big_Chest"), UltsCraftingMode.ALL, true),
+            3, 0, 7, List.of("modid:Big_Chest"), UltsCraftingMode.ALL, true, true, 120, 512),
         UltsConfigData.DEFAULT.special());
     assertEquals(7, data.canonicalize().input().drainInterval());
     assertEquals(3, data.canonicalize().input().permissionLevel());
     // Listed block ids are normalised and duplicates are dropped.
     assertEquals(List.of("modid:big_chest"),
         data.canonicalize().input().multiBlockContainers());
-    // The crafting mode and the full-inventory option are carried through untouched.
+    // The crafting mode, the full-inventory option and how a take-everything pours are carried through.
     assertEquals(UltsCraftingMode.ALL, data.canonicalize().input().crafting());
     assertTrue(data.canonicalize().input().allowFullInventory());
+    assertTrue(data.canonicalize().input().allowTakeAll());
+    assertEquals(120, data.canonicalize().input().takeAllStacks());
+    assertEquals(512, data.canonicalize().input().takeAllRate());
+  }
+
+  @Test
+  void aTakeEverythingStartsAtOneBackpackAndOneStackATick() {
+    // All three are sized for the server that runs them: whether the offer exists at all, how much one
+    // click asks for, and how much of it leaves per tick.
+    assertTrue(UltsConfigData.DEFAULT.input().allowTakeAll());
+    assertEquals(36, UltsConfigData.DEFAULT.input().takeAllStacks());
+    assertEquals(64, UltsConfigData.DEFAULT.input().takeAllRate());
+    assertTrue(UltsConfigData.DEFAULT_TAKE_ALL_STACKS <= UltsConfigData.MAX_TAKE_ALL_STACKS);
+    assertTrue(UltsConfigData.DEFAULT_TAKE_ALL_RATE <= UltsConfigData.MAX_TAKE_ALL_RATE);
   }
 
   @Test

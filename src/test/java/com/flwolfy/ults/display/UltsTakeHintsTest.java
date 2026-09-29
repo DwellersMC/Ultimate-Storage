@@ -50,6 +50,16 @@ class UltsTakeHintsTest {
   }
 
   @Test
+  void theTakeEverythingLineIsLeftOutWhileTheServerDoesNotAllowIt() {
+    // With taking everything switched off, a row never mentions it: what it does not answer, it does not
+    // promise. The box line stays, because a shift left click has nothing to do with taking everything.
+    assertEquals(List.of(UltsTakeHints.TAKE, "ults.gui.take.choose"),
+        UltsTakeHints.lines("ults.gui.take.choose", false, false));
+    assertEquals(List.of(UltsTakeHints.TAKE, "ults.gui.take.choose", "ults.gui.shift.box"),
+        UltsTakeHints.lines("ults.gui.take.choose", true, false));
+  }
+
+  @Test
   void aRowThatOnlyOpensABagListsTheRightClickAndNothingElse() {
     // A bag is opened from here rather than emptied from here, so the row lists one line and answers one
     // click: nothing is said about a left click or a shift click, because none of them does anything.

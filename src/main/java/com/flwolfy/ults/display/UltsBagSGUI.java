@@ -157,6 +157,7 @@ public final class UltsBagSGUI extends SimpleGui {
    * does.
    */
   private GuiElementBuilder statusBook(int kept, int shown, int pages) {
+    boolean takeAll = runtime.allowTakeAll();
     GuiElementBuilder book = element(Items.WRITABLE_BOOK)
         .setName(UltsGuiText.text("ults.special.status").copy().withStyle(ChatFormatting.YELLOW))
         .addLoreLine(UltsGuiText.labelled("ults.special.status.rows", kept, kept == 0));
@@ -169,19 +170,21 @@ public final class UltsBagSGUI extends SimpleGui {
             ? UltsGuiText.label("ults.gui.filter.none")
             : UltsGuiText.labelled("ults.gui.filter", filter, false))
         .addLoreLine(UltsGuiText.text("ults.special.status.hint").copy()
-            .withStyle(ChatFormatting.GRAY))
-        // Emptying the bag belongs to the bag and not to the row that opens it, so it is offered here,
-        // where the whole bag is in view. A bag holds what somebody put in, which no recipe makes, so
-        // there the crafting answer is not on offer and the screen says so by leaving it out.
-        .addLoreLine(UltsGuiText.text("ults.special.status.take").copy()
-            .withStyle(ChatFormatting.GRAY))
-        .setCallback((slot, type, action, gui) -> {
-          if (type == ClickType.MOUSE_RIGHT) {
-            UltsGuiSound.click(player);
-            UltsTakeAllSGUI.openForBag(
-                player, runtime, item, () -> UltsBagSGUI.open(player, runtime, item, page));
-          }
-        });
+            .withStyle(ChatFormatting.GRAY));
+    if (takeAll) {
+      // Emptying the bag belongs to the bag and not to the row that opens it, so it is offered here,
+      // where the whole bag is in view. A bag holds what somebody put in, which no recipe makes, so
+      // there the crafting answer is not on offer and the screen says so by leaving it out.
+      book.addLoreLine(UltsGuiText.text("ults.special.status.take").copy()
+              .withStyle(ChatFormatting.GRAY))
+          .setCallback((slot, type, action, gui) -> {
+            if (type == ClickType.MOUSE_RIGHT) {
+              UltsGuiSound.click(player);
+              UltsTakeAllSGUI.openForBag(
+                  player, runtime, item, () -> UltsBagSGUI.open(player, runtime, item, page));
+            }
+          });
+    }
     if (!filter.isEmpty()) {
       book.glow();
     }
@@ -239,7 +242,8 @@ public final class UltsBagSGUI extends SimpleGui {
         .addLoreLine(UltsGuiText.labelled(
             "ults.gui.special.updated", UltsGuiText.stamp(view.updatedAt()), !view.stampKnown()));
     UltsTakeHints.hints(builder, view.template(), obtainable, "ults.gui.take.choose",
-        UltsTakeHints.boxPossible(runtime, view.template(), stock, obtainable, boxInStock), true);
+        UltsTakeHints.boxPossible(runtime, view.template(), stock, obtainable, boxInStock),
+        runtime.allowTakeAll());
     return builder.setCallback((slot, type, action, gui) -> {
       if (type == ClickType.MOUSE_LEFT) {
         takeOneStack(view);
@@ -250,7 +254,8 @@ public final class UltsBagSGUI extends SimpleGui {
         UltsGuiSound.click(player);
         UltsWithdrawSGUI.open(player, runtime, view.template(),
             () -> UltsBagSGUI.open(player, runtime, item, page));
-      } else if (type == ClickType.MOUSE_RIGHT_SHIFT) {
+      } else if (type == ClickType.MOUSE_RIGHT_SHIFT && runtime.allowTakeAll()) {
+        // A server that does not allow taking everything answers this click with nothing at all.
         UltsGuiSound.click(player);
         UltsTakeAllSGUI.openForItem(player, runtime, view.template(),
             () -> UltsBagSGUI.open(player, runtime, item, page));

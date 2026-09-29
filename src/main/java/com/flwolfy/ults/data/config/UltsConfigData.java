@@ -19,6 +19,15 @@ public record UltsConfigData(General general, Input input, Special special) {
   /** The largest number of slots one bundle may be given. */
   public static final int MAX_BUNDLE_SLOTS = 1_000_000;
 
+  /** How many stacks one "take everything" takes out of the box: one backpack's worth. */
+  public static final int DEFAULT_TAKE_ALL_STACKS = 36;
+  /** The largest single take-everything a server may be asked for. */
+  public static final int MAX_TAKE_ALL_STACKS = 1_000_000;
+  /** How many items one "take everything" hands over per tick out of the box: one stack a tick. */
+  public static final int DEFAULT_TAKE_ALL_RATE = 64;
+  /** The fastest a take-everything may hand items over, per tick. */
+  public static final int MAX_TAKE_ALL_RATE = 1_000_000;
+
   public record General(
       String language,
       UltsItemVisibility itemVisibility,
@@ -35,6 +44,9 @@ public record UltsConfigData(General general, Input input, Special special) {
    * @param crafting whether a withdrawal may craft what is missing
    * @param allowFullInventory whether a withdrawal may go ahead with no room in the inventory, in
    *     which case what does not fit is dropped on the ground
+   * @param allowTakeAll whether players may empty a stock out with "take everything" at all
+   * @param takeAllStacks the most one "take everything" may take, counted in stacks
+   * @param takeAllRate how many items one "take everything" hands over per tick while it runs
    */
   public record Input(
       int permissionLevel,
@@ -42,7 +54,10 @@ public record UltsConfigData(General general, Input input, Special special) {
       int drainInterval,
       List<String> multiBlockContainers,
       UltsCraftingMode crafting,
-      boolean allowFullInventory
+      boolean allowFullInventory,
+      boolean allowTakeAll,
+      int takeAllStacks,
+      int takeAllRate
   ) {}
 
   /**
@@ -63,7 +78,8 @@ public record UltsConfigData(General general, Input input, Special special) {
 
   public static final UltsConfigData DEFAULT = new UltsConfigData(
       new General("en_us", UltsItemVisibility.AVAILABLE, UltsStorageMode.VOID),
-      new Input(2, 0, 2, List.of(), UltsCraftingMode.DISABLED, false),
+      new Input(2, 0, 2, List.of(), UltsCraftingMode.DISABLED, false, true,
+          DEFAULT_TAKE_ALL_STACKS, DEFAULT_TAKE_ALL_RATE),
       new Special(
           DEFAULT_BUNDLE_SLOTS,
           UltsStackRule.COMPONENTS,
@@ -107,6 +123,14 @@ public record UltsConfigData(General general, Input input, Special special) {
     if (input == null || input.crafting() == null) {
       invalid.add("input.crafting");
     }
+    if (input == null || input.takeAllStacks() < 1
+        || input.takeAllStacks() > MAX_TAKE_ALL_STACKS) {
+      invalid.add("input.takeAllStacks");
+    }
+    if (input == null || input.takeAllRate() < 1
+        || input.takeAllRate() > MAX_TAKE_ALL_RATE) {
+      invalid.add("input.takeAllRate");
+    }
     if (special == null || special.bundleSlots() < 1
         || special.bundleSlots() > MAX_BUNDLE_SLOTS) {
       invalid.add("special.bundleSlots");
@@ -138,7 +162,10 @@ public record UltsConfigData(General general, Input input, Special special) {
             input.drainInterval(),
             normalize(input.multiBlockContainers()),
             input.crafting(),
-            input.allowFullInventory()
+            input.allowFullInventory(),
+            input.allowTakeAll(),
+            input.takeAllStacks(),
+            input.takeAllRate()
         ),
         new Special(
             special.bundleSlots(),

@@ -19,6 +19,7 @@ import com.flwolfy.ults.display.UltsBagSGUI;
 import com.flwolfy.ults.display.UltsCreativeCatalog;
 import com.flwolfy.ults.display.UltsStorageSGUI;
 import com.flwolfy.ults.display.UltsSurvivalItems;
+import com.flwolfy.ults.display.UltsTakeAllStreams;
 import com.flwolfy.ults.display.UltsWithdrawSGUI;
 import com.flwolfy.ults.input.UltsContainers;
 import com.flwolfy.ults.input.UltsInputManager;
@@ -91,6 +92,8 @@ public final class UltsRuntime {
   private final UltsState state;
   private final UltsInputManager inputs;
   private final UltsHighlights highlights = new UltsHighlights();
+  /** Stocks on their way out of the storage, a tick's worth at a time. */
+  private final UltsTakeAllStreams streams = new UltsTakeAllStreams();
   /** Per player tick of the last break-protection notice, so it cannot flood the chat. */
   private final Map<UUID, Long> protectedNotices = new HashMap<>();
   private final UltsRemoteStorage.Snapshot[] remoteShards =
@@ -292,6 +295,31 @@ public final class UltsRuntime {
   /** The glowing outlines shown while the highlight mode is on. */
   public UltsHighlights highlights() {
     return highlights;
+  }
+
+  /** The stocks on their way out of the storage, one stream to a player. */
+  public UltsTakeAllStreams streams() {
+    return streams;
+  }
+
+  /** How many items one take-everything hands over per tick while it runs. */
+  public int takeAllRate() {
+    return UltsConfigManager.getInstance().data().input().takeAllRate();
+  }
+
+  /**
+   * Whether players may empty a stock out with "take everything" at all.
+   *
+   * <p>Off means the offer is not there: no hint about it and no click that starts one, so nothing about
+   * taking everything is shown.
+   */
+  public boolean allowTakeAll() {
+    return UltsConfigManager.getInstance().data().input().allowTakeAll();
+  }
+
+  /** How many stacks one take-everything takes at most, which is what its screen promises. */
+  public int takeAllStacks() {
+    return UltsConfigManager.getInstance().data().input().takeAllStacks();
   }
 
   /** Remote storage mode keeps the bound containers themselves as the storage. */
@@ -721,6 +749,9 @@ public final class UltsRuntime {
       long now = server.getTickCount();
       protectedNotices.entrySet().removeIf(entry -> now - entry.getValue() > 600);
     }
+    // Stocks on their way out go first, so a stream hands over its tick's worth before anything else
+    // asks the storage for its contents.
+    streams.tick();
     for (UltsBinding binding : inputs.tick(!remote())) {
       int index = state.number(binding);
       if (index > 0 && !state.removeBindings(index, index).isEmpty()) {
