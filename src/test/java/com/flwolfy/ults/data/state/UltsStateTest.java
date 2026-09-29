@@ -6,13 +6,19 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.flwolfy.ults.crafting.UltsTestBootstrap;
+import com.flwolfy.ults.data.config.UltsConfigData;
 import com.flwolfy.ults.data.config.UltsItemVisibility;
 import java.util.List;
 import java.util.UUID;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.component.DataComponents;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtOps;
 import net.minecraft.nbt.Tag;
+import net.minecraft.network.chat.Component;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
 import org.junit.jupiter.api.Test;
 
 class UltsStateTest {
@@ -153,5 +159,102 @@ class UltsStateTest {
 
   private static UltsBinding binding(String note, int x, int y, int z) {
     return new UltsBinding(note, "minecraft:overworld", x, y, z, "creator");
+  }
+
+  @Test
+  void identicalArrivalsAreOneStackWhateverTheyAre() {
+    UltsTestBootstrap.boot();
+    UltsState state = new UltsState();
+    ItemStack named = UltsTestBootstrap.stack(Items.DIAMOND_SWORD);
+    named.set(DataComponents.CUSTOM_NAME, Component.literal("一号剑"));
+    // Two arrivals that are identical in every way are one stack here, exactly as they would be for a
+    // plain item: what makes two special stacks different is what they carry.
+    state.deposit(named);
+    state.deposit(named.copy());
+    ItemStack other = UltsTestBootstrap.stack(Items.DIAMOND_SWORD);
+    other.set(DataComponents.CUSTOM_NAME, Component.literal("二号剑"));
+    state.deposit(other);
+
+    List<UltsStoredView> rows = state.specialsOf(Items.DIAMOND_SWORD);
+    assertEquals(2, rows.size());
+    assertTrue(rows.stream().allMatch(UltsStoredView::special));
+    assertTrue(rows.stream().allMatch(UltsStoredView::stampKnown));
+    UltsStoredView pair = rows.stream()
+        .filter(view -> "一号剑".equals(view.template().get(DataComponents.CUSTOM_NAME).getString()))
+        .findFirst().orElseThrow();
+    assertEquals(2L, pair.amount());
+
+    // Taking one row out takes exactly that row, and leaves the other one as it was.
+    ItemStack taken = state.takeBagRow(Items.DIAMOND_SWORD, pair.template());
+    assertEquals(2, taken.getCount());
+    List<UltsStoredView> left = state.specialsOf(Items.DIAMOND_SWORD);
+    assertEquals(1, left.size());
+    assertEquals("二号剑",
+        left.getFirst().template().get(DataComponents.CUSTOM_NAME).getString());
+  }
+
+  @Test
+  void takingOneRowOutOfABagLeavesTheOthersAndTheirTimesAlone() {
+    UltsTestBootstrap.boot();
+    UltsState state = new UltsState();
+    ItemStack first = UltsTestBootstrap.stack(Items.DIAMOND_SWORD);
+    first.set(DataComponents.CUSTOM_NAME, Component.literal("一号剑"));
+    ItemStack second = UltsTestBootstrap.stack(Items.DIAMOND_SWORD);
+    second.set(DataComponents.CUSTOM_NAME, Component.literal("二号剑"));
+    state.deposit(first);
+    state.deposit(second);
+    List<UltsStoredView> before = state.specialsOf(Items.DIAMOND_SWORD);
+    assertEquals(2, before.size());
+
+    // Whatever the screen was showing is what comes back, and the row that stayed keeps its time.
+    ItemStack taken = state.takeBagRow(Items.DIAMOND_SWORD, second);
+    assertEquals("二号剑", taken.get(DataComponents.CUSTOM_NAME).getString());
+    List<UltsStoredView> left = state.specialsOf(Items.DIAMOND_SWORD);
+    assertEquals(1, left.size());
+    assertEquals("一号剑", left.getFirst().template().get(DataComponents.CUSTOM_NAME).getString());
+    assertTrue(left.getFirst().stampKnown());
+
+    // A row that is not there any more hands over nothing instead of something else.
+    assertTrue(state.takeBagRow(Items.DIAMOND_SWORD, second).isEmpty());
+    assertEquals(1, state.specialsOf(Items.DIAMOND_SWORD).size());
+  }
+
+  @Test
+  void aSpecialStackThatCanHoldMoreThanOnePoolsWithItsOwnKind() {
+    UltsTestBootstrap.boot();
+    UltsState state = new UltsState();
+    ItemStack sticks = UltsTestBootstrap.stack(Items.STICK);
+    sticks.set(DataComponents.CUSTOM_NAME, Component.literal("棍"));
+    // A test cannot bind an item's own component map, so the stack size is put on the stack itself.
+    // What matters is that a stack which can hold more than one piece is not a row of its own.
+    sticks.set(DataComponents.MAX_STACK_SIZE, 64);
+    state.deposit(sticks.copyWithCount(3));
+    state.deposit(sticks.copyWithCount(4));
+
+    List<UltsStoredView> pooled = state.specialsOf(Items.STICK);
+    assertEquals(1, pooled.size());
+    assertEquals(7L, pooled.getFirst().amount());
+  }
+
+  @Test
+  void aBagDestroysTheLeastRecentlyStoredOnceItIsFull() {
+    UltsTestBootstrap.boot();
+    UltsState state = new UltsState();
+    int slots = UltsConfigData.DEFAULT.special().bundleSlots();
+    for (int arrival = 0; arrival <= slots; arrival++) {
+      ItemStack sword = UltsTestBootstrap.stack(Items.DIAMOND_SWORD);
+      sword.set(DataComponents.CUSTOM_NAME, Component.literal("剑 " + arrival));
+      state.deposit(sword);
+    }
+
+    List<UltsStoredView> rows = state.specialsOf(Items.DIAMOND_SWORD);
+    assertEquals(slots, rows.size());
+    // The one that arrived first is the one that was destroyed, and the latest arrival is still there.
+    // The arrivals of one loop share a millisecond, so which end of the bag they sit at is not fixed;
+    // what the cap decides is which of them goes.
+    assertTrue(rows.stream().noneMatch(view -> "剑 0".equals(
+        view.template().get(DataComponents.CUSTOM_NAME).getString())));
+    assertTrue(rows.stream().anyMatch(view -> ("剑 " + slots).equals(
+        view.template().get(DataComponents.CUSTOM_NAME).getString())));
   }
 }

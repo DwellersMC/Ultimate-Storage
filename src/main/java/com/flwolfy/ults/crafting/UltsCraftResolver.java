@@ -307,20 +307,29 @@ public final class UltsCraftResolver {
     budget = MAX_PLAN_NODES;
     ranOut = false;
     deadline = System.nanoTime() + PLAN_BACKSTOP_NANOS;
-    for (UltsCraftRecipe route : routes(template, true)) {
-      long operations = UltsCraftMath.divideRoundingUp(missing, route.outputCount());
-      int mark = pool.mark();
-      List<UltsCraftStep> steps = new ArrayList<>();
-      if (gather(route, operations, steps, 1, path(template))) {
-        // The pile the plan was worked out on is the pile that is kept.
-        return new UltsCraftPlan(steps, UltsCraftMath.multiply(operations, route.outputCount()));
+    // The same rule the capacity is worked out under: a plan may not consume the very item it is
+    // making from the pile, or a recipe that runs both ways would be planned as a round trip that
+    // makes nothing. A withdrawal has already kept what it promised, so this only closes the surplus.
+    UltsCraftPool.Keep previous = pool.keepState();
+    pool.keep(template, pool.amount(template));
+    try {
+      for (UltsCraftRecipe route : routes(template, true)) {
+        long operations = UltsCraftMath.divideRoundingUp(missing, route.outputCount());
+        int mark = pool.mark();
+        List<UltsCraftStep> steps = new ArrayList<>();
+        if (gather(route, operations, steps, 1, path(template))) {
+          // The pile the plan was worked out on is the pile that is kept.
+          return new UltsCraftPlan(steps, UltsCraftMath.multiply(operations, route.outputCount()));
+        }
+        pool.rollback(mark);
+        if (ranOut) {
+          return null;
+        }
       }
-      pool.rollback(mark);
-      if (ranOut) {
-        return null;
-      }
+      return null;
+    } finally {
+      pool.restoreKeep(previous);
     }
-    return null;
   }
 
   // ============================== //
@@ -408,15 +417,26 @@ public final class UltsCraftResolver {
     budget = MAX_ANSWER_NODES;
     ranOut = false;
     deadline = Math.min(deadlineNanos, System.nanoTime() + ANSWER_BACKSTOP_NANOS);
-    long best = 0L;
-    for (UltsCraftRecipe route : routes(template, true)) {
-      long operations = maxOperations(route, template);
-      if (ranOut) {
-        return UNKNOWN;
+    // What the pile already holds of the asked-for item is off limits, exactly as a withdrawal keeps
+    // the amount it promises to hand over. Without this a recipe that runs both ways is counted as
+    // production: nine gold ingots become a gold block, the block becomes nine ingots again, and the
+    // search reports nine craftable ingots that were in the pile all along. The question is how many
+    // can be *added*, and turning what is there into itself adds nothing.
+    UltsCraftPool.Keep previous = pool.keepState();
+    pool.keep(template, pool.amount(template));
+    try {
+      long best = 0L;
+      for (UltsCraftRecipe route : routes(template, true)) {
+        long operations = maxOperations(route, template);
+        if (ranOut) {
+          return UNKNOWN;
+        }
+        best = Math.max(best, UltsCraftMath.multiply(operations, route.outputCount()));
       }
-      best = Math.max(best, UltsCraftMath.multiply(operations, route.outputCount()));
+      return best;
+    } finally {
+      pool.restoreKeep(previous);
     }
-    return best;
   }
 
   /**

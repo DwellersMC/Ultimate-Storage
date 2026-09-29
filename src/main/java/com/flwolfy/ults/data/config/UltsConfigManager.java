@@ -17,13 +17,21 @@ import net.fabricmc.loader.api.FabricLoader;
 
 public final class UltsConfigManager {
 
-  /** The configuration file sits directly in the config directory, like the other mods of this project. */
-  private static final Path CONFIG_PATH = FabricLoader.getInstance().getConfigDir()
-      .resolve("ults.json");
   private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
   private static final ReentrantReadWriteLock LOCK = new ReentrantReadWriteLock();
   private static final UltsConfigManager INSTANCE = new UltsConfigManager();
   private volatile UltsConfigData data;
+
+  /**
+   * The configuration file sits directly in the config directory, like the other mods of this project.
+   *
+   * <p>The directory is asked for every time rather than once while the class loads, so a process
+   * without a game directory — a test run — gets the defaults through the ordinary error path instead
+   * of failing to load the class at all.
+   */
+  private static Path configPath() {
+    return FabricLoader.getInstance().getConfigDir().resolve("ults.json");
+  }
 
   private UltsConfigManager() {
     data = loadAtStartup();
@@ -120,22 +128,27 @@ public final class UltsConfigManager {
   }
 
   private static UltsConfigData readAndNormalize() throws Exception {
-    if (Files.notExists(CONFIG_PATH)) {
+    Path path = configPath();
+    if (Files.notExists(path)) {
       save(UltsConfigData.DEFAULT);
       return UltsConfigData.DEFAULT;
     }
     JsonObject root;
-    try (Reader reader = Files.newBufferedReader(CONFIG_PATH, StandardCharsets.UTF_8)) {
+    try (Reader reader = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
       JsonElement parsed = GSON.fromJson(reader, JsonElement.class);
       if (parsed == null || !parsed.isJsonObject()) {
         throw new IllegalArgumentException("The root configuration value must be an object");
       }
       root = parsed.getAsJsonObject();
     }
+    // The migrations run before the defaults are merged in, so a field that was renamed keeps the
+    // value the file holds instead of being filled in with the new default.
     mergeDefaults(root, GSON.toJsonTree(UltsConfigData.DEFAULT).getAsJsonObject());
     dropRetiredVisibility(root);
     dropRetiredCrafting(root);
     dropRetiredFilterMode(root);
+    dropRetiredSpecialFields(root);
+    dropRetiredStackByData(root);
     UltsConfigData loaded = GSON.fromJson(root, UltsConfigData.class);
     if (loaded == null || !loaded.validate().isEmpty()) {
       throw new IllegalArgumentException("Invalid Ults config fields: "
@@ -144,6 +157,54 @@ public final class UltsConfigManager {
     loaded = loaded.canonicalize();
     save(loaded);
     return loaded;
+  }
+
+  /**
+   * The equipment switch and the old special cap are gone, and the value an old file holds does not
+   * mean the same thing any more.
+   *
+   * <p>{@code filterEquipment} named equipment the filter took out on its own; filtering is by the
+   * item ids in {@code filters} alone now, so an existing value is dropped rather than carried over:
+   * a server that wants that gear gone names it. {@code maxEntries} counted the stacks the whole
+   * category kept, while {@code bundleSlots} counts the stacks one bag holds, so the old number is
+   * dropped and the new default put in its place.
+   */
+  private static void dropRetiredSpecialFields(JsonObject root) {
+    JsonElement special = root.get("special");
+    if (special == null || !special.isJsonObject()) {
+      return;
+    }
+    JsonObject object = special.getAsJsonObject();
+    boolean dropped = object.remove("filterEquipment") != null;
+    dropped |= object.remove("filterLootEquipment") != null;
+    if (object.remove("maxEntries") != null) {
+      dropped = true;
+      object.addProperty("bundleSlots", UltsConfigData.DEFAULT.special().bundleSlots());
+    }
+    if (dropped) {
+      UltsMod.LOGGER.info(
+          "UltStorage: the equipment switch and the old special cap were dropped; the filter names "
+              + "{} item id(s) and a bag holds {} stack(s)",
+          UltsConfigData.DEFAULT.special().filters().size(),
+          UltsConfigData.DEFAULT.special().bundleSlots());
+    }
+  }
+
+  /**
+   * The switch that decided whether identical data meant one kind of thing is gone.
+   *
+   * <p>It is how the storage works now and not something to turn off, so an existing value is dropped
+   * rather than carried over: what it used to turn off was the way the mod behaved before it.
+   */
+  private static void dropRetiredStackByData(JsonObject root) {
+    JsonElement special = root.get("special");
+    if (special == null || !special.isJsonObject()) {
+      return;
+    }
+    if (special.getAsJsonObject().remove("stackByData") != null) {
+      UltsMod.LOGGER.info("UltStorage: the stackByData switch was dropped; identical data always "
+          + "means one kind of thing now");
+    }
   }
 
   /** A visibility mode that is not part of the mod any more falls back to the default one. */
@@ -221,16 +282,17 @@ public final class UltsConfigManager {
   }
 
   private static void save(UltsConfigData value) throws Exception {
-    Files.createDirectories(CONFIG_PATH.getParent());
-    Path temporary = CONFIG_PATH.resolveSibling(CONFIG_PATH.getFileName() + ".tmp");
+    Path path = configPath();
+    Files.createDirectories(path.getParent());
+    Path temporary = path.resolveSibling(path.getFileName() + ".tmp");
     try (Writer writer = Files.newBufferedWriter(temporary, StandardCharsets.UTF_8)) {
       GSON.toJson(value, writer);
     }
     try {
-      Files.move(temporary, CONFIG_PATH, StandardCopyOption.REPLACE_EXISTING,
+      Files.move(temporary, path, StandardCopyOption.REPLACE_EXISTING,
           StandardCopyOption.ATOMIC_MOVE);
     } catch (java.nio.file.AtomicMoveNotSupportedException ignored) {
-      Files.move(temporary, CONFIG_PATH, StandardCopyOption.REPLACE_EXISTING);
+      Files.move(temporary, path, StandardCopyOption.REPLACE_EXISTING);
     }
   }
 }

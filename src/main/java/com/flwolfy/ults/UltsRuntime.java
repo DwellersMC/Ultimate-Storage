@@ -6,13 +6,16 @@ import com.flwolfy.ults.crafting.UltsCraftResolver;
 import com.flwolfy.ults.data.config.UltsConfigManager;
 import com.flwolfy.ults.data.config.UltsCraftingMode;
 import com.flwolfy.ults.data.config.UltsStorageMode;
+import com.flwolfy.ults.data.lang.UltsItemNames;
 import com.flwolfy.ults.data.lang.UltsLangManager;
 import com.flwolfy.ults.data.state.UltsBinding;
 import com.flwolfy.ults.data.state.UltsRemoteStorage;
 import com.flwolfy.ults.data.state.UltsState;
 import com.flwolfy.ults.data.state.UltsStoredView;
 import com.flwolfy.ults.data.state.UltsSpecialFilters;
+import com.flwolfy.ults.data.state.UltsWithdrawalOutput;
 import com.flwolfy.ults.data.state.UltsWithdrawalPlan;
+import com.flwolfy.ults.display.UltsBagSGUI;
 import com.flwolfy.ults.display.UltsCreativeCatalog;
 import com.flwolfy.ults.display.UltsStorageSGUI;
 import com.flwolfy.ults.display.UltsSurvivalItems;
@@ -36,6 +39,7 @@ import net.minecraft.server.permissions.LevelBasedPermissionSet;
 import net.minecraft.server.permissions.PermissionLevel;
 import net.minecraft.server.permissions.PermissionSet;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.Level;
@@ -112,6 +116,8 @@ public final class UltsRuntime {
   private long craftableBudgetTick = Long.MIN_VALUE;
   private long craftableDeadline = Long.MAX_VALUE;
   private boolean craftableDeferred;
+  /** Whether the view the answers come from is behind the contents and has not caught up yet. */
+  private boolean craftableViewStale;
   /** How many rows the current view has already left waiting. */
   private int craftableWaits;
 
@@ -149,11 +155,12 @@ public final class UltsRuntime {
     UltsCreativeCatalog.rebuild(server);
     UltsSurvivalItems.rebuild(server);
     UltsCraftCatalog.rebuild(server);
-    UltsSpecialFilters.rebuild(UltsSurvivalItems.lootEquipment());
+    UltsSpecialFilters.rebuild();
     UltsMod.LOGGER.info(
-        "UltStorage special filter: {} item(s) named, {} loot table equipment, mode {}",
-        UltsSpecialFilters.declaredSize(), UltsSpecialFilters.lootEquipmentSize(),
-        UltsConfigManager.getInstance().data().special().filterMode());
+        "UltStorage special filter: {} item id(s) named, filter mode {}, a bag holds {} stack(s)",
+        UltsSpecialFilters.declaredSize(),
+        UltsConfigManager.getInstance().data().special().filterMode(),
+        UltsConfigManager.getInstance().data().special().bundleSlots());
   }
 
   /**
@@ -167,6 +174,9 @@ public final class UltsRuntime {
    * there is nothing to clear and the filter only hides them from the listings.
    */
   public void reload() {
+    // The words a search is answered with are read from files too, so a language a server owner has
+    // just dropped in is picked up by the same command that rereads everything else.
+    UltsItemNames.clear();
     rebuildCatalogs(server);
     if (state.purgeFiltered()) {
       UltsMod.LOGGER.info("UltStorage destroyed the stored stacks the special filter now dismisses");
@@ -176,6 +186,80 @@ public final class UltsRuntime {
   /** Whether a withdrawal may go ahead with no room in the inventory, dropping what does not fit. */
   public boolean allowFullInventory() {
     return UltsConfigManager.getInstance().data().input().allowFullInventory();
+  }
+
+  /**
+   * The stored rows of one item that carries data of its own, newest first: what the bag a special
+   * row opens holds.
+   *
+   * <p>Void storage keeps one row per arrival, and those rows are exactly what the bag lists. Remote
+   * storage has no rows of its own — its items sit in containers a player bound — so it lists the
+   * variants it found there, one per combination of components.
+   *
+   * @param item the item whose bag is being shown
+   * @return the rows, newest first
+   */
+  public List<UltsStoredView> specialsOf(Item item) {
+    if (remote()) {
+      return aggregate().items().stream()
+          .filter(view -> view.special() && view.template().is(item))
+          .toList();
+    }
+    return state.specialsOf(item);
+  }
+
+  /**
+   * How many of a stack, components and all, a listing says the storage holds.
+   *
+   * @param template the stack to count, exactly as it is stored
+   * @param stock the listing to count it in
+   */
+  public static long storedAmount(ItemStack template, List<UltsStoredView> stock) {
+    long amount = 0L;
+    for (UltsStoredView view : stock) {
+      if (ItemStack.isSameItemSameComponents(view.template(), template)) {
+        amount += view.amount();
+      }
+    }
+    return amount;
+  }
+
+  /**
+   * The stacks a bag holds, newest first: one stack per stored thing, whole.
+   *
+   * <p>A stack is handed over as it is, so a named sword somebody stored comes back as that sword.
+   * A row that holds more than one stack of the same thing is split, because a bag holds stacks and
+   * never a pile.
+   *
+   * @param item the item whose bag is being shown
+   * @return the stacks, newest first
+   */
+  public List<ItemStack> bagEntries(Item item) {
+    List<ItemStack> entries = new ArrayList<>();
+    for (UltsStoredView view : specialsOf(item)) {
+      entries.addAll(UltsWithdrawalOutput.stacks(view.template(), view.amount()));
+    }
+    return entries;
+  }
+
+  /**
+   * Takes one row out of a bag, whole.
+   *
+   * <p>Void storage owns its rows, so the row that matches the stack is removed and comes back as it
+   * was stored, its time and its place among the other rows of that item untouched. Remote storage
+   * owns nothing — the containers a player bound do — so the stack is withdrawn from them instead.
+   *
+   * @param item the item whose bag is being taken from
+   * @param stack the stack that is leaving, components and all
+   * @return the stack that left, or an empty stack when it could not be taken
+   */
+  public ItemStack takeBagRow(Item item, ItemStack stack) {
+    if (remote()) {
+      List<ItemStack> taken = takePlanned(stack.copyWithCount(1), stack.getCount(), false);
+      invalidateRemote();
+      return taken.isEmpty() ? ItemStack.EMPTY : taken.getFirst();
+    }
+    return state.takeBagRow(item, stack);
   }
 
   public MinecraftServer server() {
@@ -269,6 +353,23 @@ public final class UltsRuntime {
   }
 
   /**
+   * How many more of an item a given stock could craft right now, answered from the contents as they
+   * are rather than from the view a listing is allowed to be a moment behind.
+   *
+   * <p>A row shows answers that may be up to {@link #CRAFTABLE_REFRESH_TICKS} ticks old, so that a
+   * storage taking arrivals every tick does not have its whole craft graph worked out again and again.
+   * A click is not a moment: it is one event, and it has to be answered from the storage as it stands,
+   * or the row would ask for an amount that is no longer there — and stay quiet about one that is.
+   *
+   * @param template the item in question
+   * @param stock contents to craft from
+   * @return the largest amount the open crafting routes can produce right now
+   */
+  public long craftableFresh(ItemStack template, List<UltsStoredView> stock) {
+    return craftable(template, stock, true, true);
+  }
+
+  /**
    * How much could be crafted if a station were stored.
    *
    * <p>Only used to explain the missing station on an item row, so it answers zero while crafting is
@@ -293,7 +394,7 @@ public final class UltsRuntime {
    * @return whether at least one could be made right now
    */
   public boolean craftableNow(ItemStack template, List<UltsStoredView> stock) {
-    UltsCraftResolver view = view(stock, true);
+    UltsCraftResolver view = view(stock, true, false);
     if (view == null) {
       return false;
     }
@@ -312,13 +413,26 @@ public final class UltsRuntime {
     craftableDeferred = craftableWaits < MAX_CRAFTABLE_WAITS;
   }
 
-  /** Whether an answer had to wait for a later tick, so a screen showing them may redraw. */
+  /**
+   * Whether an answer is still owed: either one had to wait for a later tick, or the view the answers
+   * come from is older than the contents and has not caught up yet. A screen showing them redraws while
+   * this is true, which is what keeps an amount from being left on screen after it stopped being true.
+   */
   public boolean craftablePending() {
-    return craftableDeferred;
+    return craftableDeferred || craftableViewStale;
   }
 
   private long craftable(ItemStack template, List<UltsStoredView> stock, boolean requireStation) {
-    UltsCraftResolver view = view(stock, requireStation);
+    return craftable(template, stock, requireStation, false);
+  }
+
+  private long craftable(
+      ItemStack template,
+      List<UltsStoredView> stock,
+      boolean requireStation,
+      boolean fresh
+  ) {
+    UltsCraftResolver view = view(stock, requireStation, fresh);
     if (view == null) {
       return 0L;
     }
@@ -347,11 +461,22 @@ public final class UltsRuntime {
    * The view of a pile, remembered for the contents it was built from.
    *
    * <p>A storage that changes every tick would otherwise have the whole catalogue worked out every
-   * tick, so an answer is allowed to be a moment old and the view is only rebuilt once the contents
-   * have settled. A withdrawal always plans again on the live contents, so an answer that is a moment
-   * old can never be acted on.
+   * tick, so a listing may be answered from a view that is up to {@link #CRAFTABLE_REFRESH_TICKS} ticks
+   * old, and the view is rebuilt once the contents have settled. Such an answer is never the last word:
+   * {@link #craftableViewStale} remembers that the view is behind, {@link #craftablePending()} says so,
+   * and a screen showing the answers redraws until the view has caught up — otherwise the amounts of
+   * the contents before the change would simply stay on screen. A click does not wait at all: it asks
+   * through {@link #craftableFresh} and is answered from the contents as they are.
+   *
+   * @param stock contents the answers are wanted for
+   * @param requireStation whether the stored station is needed
+   * @param fresh whether the answer must come from these contents, however recently the view was built
    */
-  private @Nullable UltsCraftResolver view(List<UltsStoredView> stock, boolean requireStation) {
+  private @Nullable UltsCraftResolver view(
+      List<UltsStoredView> stock,
+      boolean requireStation,
+      boolean fresh
+  ) {
     UltsCraftingMode mode = craftingMode();
     if (!mode.enabled()) {
       return null;
@@ -359,8 +484,13 @@ public final class UltsRuntime {
     long fingerprint = fingerprintOf(stock);
     if (fingerprint != craftableFingerprint || mode != craftableMode) {
       long tick = server.getTickCount();
-      if (craftableTick != Long.MIN_VALUE && tick - craftableTick < CRAFTABLE_REFRESH_TICKS) {
-        // The contents moved again before they settled, so the answers of a moment ago still stand.
+      if (!fresh
+          && craftableTick != Long.MIN_VALUE
+          && tick - craftableTick < CRAFTABLE_REFRESH_TICKS) {
+        // The contents moved again before they settled, so the answers of a moment ago still stand —
+        // for now: they are owed for the contents as they are, so a screen keeps redrawing until this
+        // view has caught up instead of showing the old amounts for ever.
+        craftableViewStale = true;
         return requireStation ? craftableView : looseView();
       }
       UltsCraftPool pool = UltsCraftPool.of(stock);
@@ -372,6 +502,7 @@ public final class UltsRuntime {
       craftableMode = mode;
       craftableTick = tick;
       craftableWaits = 0;
+      craftableViewStale = false;
     }
     return requireStation ? craftableView : looseView();
   }
@@ -416,12 +547,30 @@ public final class UltsRuntime {
 
   /** Withdrawals always read the live containers, then drop the cached aggregate. */
   public List<ItemStack> takePlanned(ItemStack template, int quantity, boolean boxed) {
+    return takePlanned(template, quantity, boxed, craftingMode());
+  }
+
+  /**
+   * A withdrawal that says itself whether it may craft what is missing.
+   *
+   * <p>The configuration decides for every ordinary withdrawal; a screen that offers the player the
+   * choice passes the mode in, so taking everything out of the storage can be asked for with or without
+   * the recipes filling in what is short.
+   *
+   * @param mode whether, and how far, the storage may craft what is missing
+   */
+  public List<ItemStack> takePlanned(
+      ItemStack template,
+      int quantity,
+      boolean boxed,
+      UltsCraftingMode mode
+  ) {
     if (!remote()) {
-      UltsWithdrawalPlan plan = state.withdrawalPlan(template, quantity, boxed, craftingMode());
+      UltsWithdrawalPlan plan = state.withdrawalPlan(template, quantity, boxed, mode);
       return state.takePlanned(plan, template, quantity, boxed);
     }
     List<ItemStack> outputs = UltsRemoteStorage.take(
-        server, state.bindings(), template, quantity, boxed, craftingMode());
+        server, state.bindings(), template, quantity, boxed, mode);
     invalidateRemote();
     return outputs;
   }
@@ -598,6 +747,7 @@ public final class UltsRuntime {
     }
     UltsStorageSGUI.refreshAll(this);
     UltsWithdrawSGUI.refreshAll(this);
+    UltsBagSGUI.refreshAll(this);
   }
 
   /** Shows "#N note" over the action bar while a player looks at a bound container. */

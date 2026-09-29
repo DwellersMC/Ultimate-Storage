@@ -6,6 +6,7 @@ import com.flwolfy.ults.data.config.UltsConfigManager;
 import com.flwolfy.ults.data.config.UltsCraftingMode;
 import com.flwolfy.ults.data.config.UltsItemVisibility;
 import com.flwolfy.ults.data.config.UltsSpecialFilter;
+import com.flwolfy.ults.data.config.UltsStackRule;
 import com.flwolfy.ults.data.config.UltsStorageMode;
 import com.flwolfy.ults.data.lang.UltsLangManager;
 import com.flwolfy.ults.modmenu.entry.UltsIdListEntry;
@@ -58,8 +59,8 @@ public final class UltsConfigScreen {
     Field<Integer> drainInterval = new Field<>(current.input().drainInterval());
     Field<UltsCraftingMode> crafting = new Field<>(current.input().crafting());
     Field<Boolean> allowFullInventory = new Field<>(current.input().allowFullInventory());
-    Field<Integer> maxSpecial = new Field<>(current.special().maxEntries());
-    Field<Boolean> filterLoot = new Field<>(current.special().filterLootEquipment());
+    Field<Integer> bundleSlots = new Field<>(current.special().bundleSlots());
+    Field<UltsStackRule> stackRule = new Field<>(current.special().stackRule());
     Field<UltsSpecialFilter> filterMode = new Field<>(current.special().filterMode());
     UltsIdEditorModel multiBlock = new UltsIdEditorModel(
         current.input().multiBlockContainers(),
@@ -87,9 +88,9 @@ public final class UltsConfigScreen {
         idListEntry(entries, "multi_block_containers", multiBlock, false)
     );
     List<AbstractConfigListEntry<?>> specialEntries = List.of(
-        maxSpecialEntry(entries, maxSpecial),
+        stackRuleEntry(entries, stackRule),
+        bundleSlotsEntry(entries, bundleSlots),
         filterModeEntry(entries, filterMode),
-        filterLootEntry(entries, filterLoot),
         idListEntry(entries, "special_filters", filters, false)
     );
     // One list entry may only sit in one place, so the overview builds its own copies of everything.
@@ -107,9 +108,9 @@ public final class UltsConfigScreen {
         idListEntry(entries, "multi_block_containers", multiBlock, true)
     );
     List<AbstractConfigListEntry<?>> specialOverview = List.of(
-        maxSpecialEntry(entries, maxSpecial),
+        stackRuleEntry(entries, stackRule),
+        bundleSlotsEntry(entries, bundleSlots),
         filterModeEntry(entries, filterMode),
-        filterLootEntry(entries, filterLoot),
         idListEntry(entries, "special_filters", filters, true)
     );
 
@@ -135,8 +136,8 @@ public final class UltsConfigScreen {
               allowFullInventory.resolve()
           ),
           new UltsConfigData.Special(
-              maxSpecial.resolve(),
-              filterLoot.resolve(),
+              bundleSlots.resolve(),
+              stackRule.resolve(),
               filterMode.resolve(),
               filters.values()
           )
@@ -283,24 +284,42 @@ public final class UltsConfigScreen {
   }
 
   /**
-   * How many special entries the storage keeps.
+   * How many stacks one bag holds.
    *
-   * <p>It is a count, not a page number: the listing turns it into the pages a player sees, and the
-   * tooltip says how many those are.
+   * <p>It is a count of stored stacks, not a page number: the screen turns it into the pages a player
+   * pages through, and the tooltip says how many those are.
    */
-  private static AbstractConfigListEntry<?> maxSpecialEntry(
+  private static AbstractConfigListEntry<?> bundleSlotsEntry(
       ConfigEntryBuilder entries,
       Field<Integer> field
   ) {
     AbstractConfigListEntry<Integer> entry = entries.startIntField(
-            Component.translatable(KEY + "special_max_entries"), field.initial())
-        .setDefaultValue(UltsConfigData.DEFAULT.special().maxEntries())
-        .setMin(0)
-        .setMax(UltsConfigData.MAX_SPECIAL_ENTRIES)
+            Component.translatable(KEY + "special_bundle_slots"), field.initial())
+        .setDefaultValue(UltsConfigData.DEFAULT.special().bundleSlots())
+        .setMin(1)
+        .setMax(UltsConfigData.MAX_BUNDLE_SLOTS)
         .setTooltip(Component.translatable(
-            KEY + "special_max_entries.tooltip",
-            UltsConfigData.SPECIAL_PAGE_SIZE,
-            UltsConfigData.DEFAULT_SPECIAL_PAGES))
+            KEY + "special_bundle_slots.tooltip",
+            UltsConfigData.BUNDLE_PAGE_SIZE,
+            UltsConfigData.DEFAULT_BUNDLE_SLOTS,
+            UltsConfigData.pagesOf(UltsConfigData.DEFAULT_BUNDLE_SLOTS)))
+        .build();
+    return field.track(entry);
+  }
+
+  /** When two stacks of one item are the same kind of thing and pool into one row. */
+  private static AbstractConfigListEntry<?> stackRuleEntry(
+      ConfigEntryBuilder entries,
+      Field<UltsStackRule> field
+  ) {
+    AbstractConfigListEntry<UltsStackRule> entry = entries.startEnumSelector(
+            Component.translatable(KEY + "special_stack_rule"),
+            UltsStackRule.class,
+            field.initial())
+        .setDefaultValue(UltsConfigData.DEFAULT.special().stackRule())
+        .setTooltip(Component.translatable(KEY + "special_stack_rule.tooltip"))
+        .setEnumNameProvider(value -> Component.translatable(
+            KEY + "special_stack_rule.value." + value.name().toLowerCase(Locale.ROOT)))
         .build();
     return field.track(entry);
   }
@@ -322,20 +341,7 @@ public final class UltsConfigScreen {
     return field.track(entry);
   }
 
-  /** Whether equipment the loot tables can drop counts as filtered as well. */
-  private static AbstractConfigListEntry<?> filterLootEntry(
-      ConfigEntryBuilder entries,
-      Field<Boolean> field
-  ) {
-    AbstractConfigListEntry<Boolean> entry = entries.startBooleanToggle(
-            Component.translatable(KEY + "special_filter_loot"), field.initial())
-        .setDefaultValue(UltsConfigData.DEFAULT.special().filterLootEquipment())
-        .setTooltip(Component.translatable(KEY + "special_filter_loot.tooltip"))
-        .build();
-    return field.track(entry);
-  }
-
-  /** Item ids the special filter throws away, on top of the equipment the loot tables add. */
+  /** Item ids the special filter throws away. */
   private static AbstractConfigListEntry<?> idListEntry(
       ConfigEntryBuilder entries,
       String key,

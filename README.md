@@ -23,7 +23,7 @@ Storage belongs to the save, not to a name: a world has **one** storage, its inp
 - Multi-block containers: vanilla chests are recognised on their own, modded containers can be listed
 - Three item visibility modes, including a derived **survival obtainable** catalogue; the configured mode is the default and every player can switch their own with a right-click on the status book
 - Optional **automatic crafting**: when a withdrawal runs short, the storage crafts the missing part from what it has, following recipes down as far as it takes, using a stored crafting table or stonecutter
-- **Special data items** are managed rather than left to pile up: their category lists the newest first and shows *when* each stack was last stored, a configurable cap destroys the least recently stored ones past it, and a filter can throw unwanted ones away on sight — optionally including every piece of equipment a loot table can drop
+- **Special data items** are managed rather than left to pile up: one row per item stands for its bag, drawn as the newest stack that arrived in it, under two yellow rules that say which stack that is — a right click opens the bag itself, a spacious screen of stored stacks a page at a time where a box of one is packed and the whole bag is emptied from; a configurable capacity destroys the least recently stored ones past it, and a filter can throw unwanted ones away on sight — named by item id, nothing else
 - Two storage modes: a server-side void store or the bound containers themselves (remote)
 - Bundled `en_us`, `zh_cn` and `zh_tw` messages; further locales are discovered at runtime
 - **Cloth Config** API support through Mod Menu (client-side, optional)
@@ -101,15 +101,15 @@ config/ults.json
     "allowFullInventory": false
   },
   "special": {
-    "maxEntries": 350,
-    "filterLootEquipment": false,
+    "bundleSlots": 120,
+    "stackRule": "COMPONENTS",
     "filterMode": "OFF",
     "filters": []
   }
 }
 ```
 
-A missing file, a missing field or an unknown enum value falls back to the default, and the file is rewritten in canonical form on load. `general.language` and `general.itemVisibility` / `general.storageMode` are applied by `/ults reload`. `special.maxEntries` is applied as soon as the next stack is stored or the world is loaded again, so lowering it trims the category without waiting for a restart.
+A missing file, a missing field or an unknown enum value falls back to the default, and the file is rewritten in canonical form on load. `general.language` and `general.itemVisibility` / `general.storageMode` are applied by `/ults reload`. `special.bundleSlots` is applied as soon as the next stack is stored or the world is loaded again, so lowering it trims a bag without waiting for a restart. A file written by an earlier release holds `maxEntries`, `filterEquipment` and `stackByData`; all three are dropped on load, because none means what it used to — the old cap counted every special stack the storage kept while `bundleSlots` counts the stacks one bag holds, equipment is no longer named by a switch, and pooling identical data is now simply how the storage works rather than something to turn off. **Filtering is by `special.filters` alone**, so a server that wants a farm's gear gone writes that gear down.
 
 ---
 
@@ -136,25 +136,77 @@ A missing file, a missing field or an unknown enum value falls back to the defau
 
 ### Special Settings
 
-Stacks whose components no creative tab entry describes — anything with a custom name, stored enchantments, a written book — cannot stack with their own kind, so each one takes a row of its own. These settings decide how many such rows the storage keeps and which of them are worth keeping at all; see [Special Data Items](#special-data-items).
+A stack that carries data of its own — a custom name, stored enchantments, a written book, a brew, anything worn — is **one kind of thing per its components**: two stacks of the same kind are one stack, whether or not the game would let them sit in one slot, and a stack **no tab entry matches exactly** is a **bag** of the special category, because a category has no row to put it on. These settings decide what counts as one kind, how much one bag holds, and which of those stacks are worth keeping at all; see [Special Data Items](#special-data-items).
 
 | Field                   | Type       | Description                                                                                                                     |
 |-------------------------|------------|---------------------------------------------------------------------------------------------------------------------------------|
-| `maxEntries`            | `int`      | How many special entries (kinds, not pieces) the storage keeps; `0` means none. Defaults to `350`, which is ten pages of the storage screen. Past it the **least recently stored** entry is destroyed as new ones arrive. |
-| `filterLootEquipment`   | `bool`     | Also filter every piece of equipment any loot table can drop — the near identical swords and armour that fill structure chests. Defaults to `false`. Only equipment counts: an item has to carry durability to be one. |
+| `stackRule`             | `enum`     | When two stacks of one item are the same kind and pool into one row: `COMPONENTS` (every component identical, durability included) or `TOOLTIP` (the same thing read on them is enough). Defaults to `COMPONENTS`; see below. |
+| `bundleSlots`           | `int`      | How many stored stacks one bag holds. Defaults to `120`, which is three pages of the bag screen (forty-five stacks to a page). Past it the **least recently stored** stack is destroyed as new ones arrive. |
 | `filterMode`            | `enum`     | What the filter does to the items it names: `OFF`, `KEEP_FULL_DURABILITY` or `FILTER_ALL`; see below. Defaults to `OFF`.          |
-| `filters`               | `string[]` | Item ids the filter names itself, on top of the loot table equipment. Namespaces may be omitted and case is folded. Empty by default. |
+| `filters`               | `string[]` | Item ids the filter takes out of the storage. Namespaces may be omitted and case is folded. **Nothing is filtered unless it is named here.** Empty by default. |
+
+#### When two stacks are one kind
+
+The item and its name are the precondition: a plain sword and an enchanted one are two kinds, and so are
+two swords with different names. `special.stackRule` decides how much of the rest has to agree.
+
+| Rule | What it means |
+|------|---------------|
+| `COMPONENTS` (default) | Every component has to be identical, durability included — the game's own rule for two interchangeable stacks. A stack handed over is always the very one that was stored. |
+| `TOOLTIP` | It is enough that a player would read the same thing on them, so two swords worn differently pool while a different enchantment never does. A stack handed over is then a stack of that kind rather than the exact one that was put in. |
+
+Changing the rule re-reads the storage: `/ults reload` pools what is already stored by the new rule, so
+switching to `TOOLTIP` merges the rows it can merge.
+
+**The one rule is used everywhere two stacks are compared**, not only in the special category: what pools
+into one stored row, what a catalogue row counts as its own stock — under `TOOLTIP` a sword that is merely
+more worn is counted by its item's row — and whether a category can show a stack at all. So with
+`TOOLTIP`, a plain sword and a worn plain sword are one kind and both belong to Combat, while an enchanted
+one is a kind of its own and still goes to the special category.
+
+#### What a category can hold, and what a bag is for
+
+A category is the creative tab's listing, and it can only show a stored stack of a kind some tab entry is
+— under the components rule that means component for component, and under the tooltip rule that means the
+same thing read on both. Everything else — the enchanted sword, the named pickaxe, the brew nobody lists —
+goes to **Special Data Items**, where one bag holds every such stack of one item. That is the rule behind
+both examples: a plain netherite sword is in Combat, an enchanted one is in the special category.
+
+#### What the filter names, and what it cannot see
+
+The filter decides by **item id**, and only by the ids written in `filters`: there is no switch that
+names equipment for you. Two things are worth knowing before trusting it to keep a bag clean.
+
+**1. A mob's gear is put there by game code, so no loot table mentions it.** A zombified piglin's
+spear and a piglin's golden armour are handed to the mob while it spawns; the zombified piglin's own
+loot table drops nothing but rotten flesh, gold nuggets and gold ingots. A farm's equipment output
+therefore has to be named item by item — `minecraft:golden_spear`, `minecraft:golden_helmet` and so on
+— which is exactly what the list is for.
+
+**2. Six item kinds have no component-free form at all**, so every instance of them carries data and none of them can ever be a plain stack: `enchanted_book`, `potion`, `splash_potion`, `lingering_potion`, `tipped_arrow`, `suspicious_stew`. None of them carries durability, so no list of equipment could ever name them, and **enchanted books are the one to watch**: villager halls, fishing and chests all produce them, and every enchantment and level is its own kind of stack. They are rows of the book item like any other; name them in `filters` if you want them gone.
+
+**3. Component variants of an item that also has a plain form** are named by `filters` too: a banner
+with patterns, a goat horn with an instrument, a bucket with a fish, a decorated pot, a compass bound
+to a lodestone.
+
+**The backstop:** `special.bundleSlots` bounds one bag, and it destroys the least recently stored entry
+once that bag is full, so a bag can never grow without limit. Only the items no category lists take a bag
+at all now, and there is no cap across a whole category, so a server that takes in a lot of
+data-carrying stacks — a farm's gear, enchanted books — should keep `filters` up to date.
 
 ---
 
 ### Special Data Items
 
-A stack that carries data of its own — a named sword, an enchanted book, a written book, anything damaged — stacks with nothing, so it gets a row of its own in **Special Data Items** instead of joining the stack of its plain item. Somewhere to put them is not the same as somewhere to keep them forever, so the category is managed:
+A stack that carries data of its own — a named sword, an enchanted book, a written book, anything damaged — is **one kind of thing per exact set of components**, and it is a row of its own item in the category that item belongs to, right after that item's own rows. What is left for a **bag** is a stack whose item no visible category lists at all, so there is no row to put it on. See [How variants are stacked](#how-variants-are-stacked).
 
-- **Newest first.** The category lists the most recently stored entry at the top.
-- **When it arrived.** A special row never shows a craftable amount: what could be made of an item says nothing about one particular named sword. The row shows **when that entry was last stored** instead, and the very same time is what the listing sorts and trims by. Storing the same stack again — a second identical named sword — counts as it arriving again: the two share one row, and that row's time, amount and position all move to the front.
-- **A cap with the least recently stored going first.** Once the category holds more than `special.maxEntries` entries, the ones with the oldest time are destroyed as new ones arrive. The cap counts **kinds, not pieces**: two identically named swords share one entry, so they cost one and refreshing them pushes nothing out. The cap is enforced again when the world loads, so lowering it trims an existing storage.
-- **A filter for what is not worth a row.** Items named in `special.filters`, plus — when `special.filterLootEquipment` is on — every piece of equipment a loot table can drop, are taken out of the storage. `special.filterMode` decides how hard it comes down on them:
+- **One row per kind.** Two stacks of the same kind are **one stack**, exactly as they would be for a plain item: what makes two of them different is what they carry, not how many of them fit in a slot. Which kinds those are is `special.stackRule`; the item and its name are always part of it.
+- **A category only shows what its own tabs list**, in the sense the stacking rule gives that word: under `COMPONENTS` component for component, under `TOOLTIP` the same thing read on both. A netherite sword is the combat tab's business; an **enchanted** netherite sword is not, because no tab entry reads like it — so it is special.
+- **A bag row.** A stored stack no category can show goes to the special category, where one bag keeps every such stack of one item together: **Special Data Items** shows one row for each such item and says how many stacks are in the bag and when the newest of them arrived. Rows are ordered newest first, in the special category and at the end of **All Items** alike.
+- **The bag row is its bag.** One row stands for one item and everything of it that carries data of its own, and it is drawn as **the stack that arrived last** — an enchanted book lists the enchantment it holds, a named sword the lore written on it — under a title that names the bag: `【附魔书】收纳袋`, which is the item's own name in brackets with the word for a bag after it. `最新` / `Latest` marks the block under that title as the newest arrival, and a short yellow rule closes it off from the bag's own facts: how many stacks the bag holds — or, while a search is on, how many of them that search kept — and when the newest arrived.
+- **The row answers one click: a right click opens the bag.** There is no shortcut take here, because what a bag holds is a crowd and the row is drawn as only the newest member of it — everything inside is taken from inside, on rows of its own, where the bag is open and the whole of it is in view. A left click, and both shift clicks, do nothing. See [Bag Screen](#bag-screen) and [Taking everything](#taking-everything).
+- **A cap with the least recently stored going first.** A bag holds at most `special.bundleSlots` stacks (120 by default, three pages). Once it holds more, the ones that arrived longest ago are destroyed as new ones arrive. The cap counts **stacks, not pieces**: two differently named swords cost two of it, while putting the same named sword in twice costs one. The cap is enforced again when the world loads and on `/ults reload`, so lowering it trims an existing bag.
+- **A filter for what is not worth keeping.** Items named in `special.filters` are taken out of the storage. `special.filterMode` decides how hard it comes down on them:
 
 | Mode                   | What happens to a filtered special stack                                                            |
 |------------------------|-----------------------------------------------------------------------------------------------------|
@@ -169,10 +221,10 @@ A stack that carries data of its own — a named sword, an enchanted book, a wri
 | `VOID`   | **Destroyed.** The storage holds these items itself, so they are thrown away on the way in — and applying the filter again clears out what was already stored, so changing the filter empties the store of what it now names rather than only stopping new arrivals. |
 | `REMOTE` | **Hidden.** The items sit in containers a player bound, which are not the storage's to destroy, so nothing is ever removed: a filtered stack simply never appears in a listing, a box count or a plan. Take it out of the chest by hand if you want it. |
 
-- **Only special stacks are affected.** A plain iron sword stacks with its own kind, so it is never special and the filter never touches it — however its item is listed. The filter only ever sees the stacks that would otherwise take a special row.
+- **Only bagged stacks are affected.** A plain iron sword stacks with its own kind, so it is never special and the filter never touches it — however its item is listed. A stack that can hold more than one piece pools with its kind for the same reason. The filter only ever sees the stacks that would otherwise take an entry in a bag.
 - **A stack a player renamed is never touched either.** Giving something a name is a deliberate act — the stack is somebody's own thing, not anonymous loot — so the filter leaves it alone whatever the list and the mode say, in both storage modes. Enchanting is *not* renaming: enchanted gear is filtered like anything else. A named shulker box and everything inside it can therefore never be thrown away by the filter.
 - In `VOID` mode the filter is applied on the way in, including the contents of an unnamed shulker box being emptied into the storage, and again whenever the filter is applied. Anything it destroys is gone: there is no bin to recover it from.
-- The survival catalogue already walks every loot table, so the equipment list is derived from the same pass and costs nothing extra. In vanilla 26.2 it names 52 items.
+- **What a farm produces has to be named item by item**: no loot table mentions the gear the game hands to a mob while it spawns, so there is no switch that could name it for you — see [what the filter names](#what-the-filter-names-and-what-it-cannot-see).
 - The Mod Menu screen validates every item id while you type and refuses to save one that names no item of the running game.
 
 ---
@@ -193,7 +245,7 @@ With `input.crafting` enabled, a withdrawal that runs short is completed by craf
 - Routes are compared and the best one wins: whichever route produces the most from the current stock, and among those the one needing the fewest operations. A recipe that a stonecutter does in fewer operations is therefore preferred over the crafting table while a stonecutter is stored, and the crafting table takes over when no stonecutter is left.
 - Only the missing part is crafted. Withdrawing 64 of an item while 60 are stored and the recipe produces 4 per operation runs the recipe once and takes the remaining 60 from the stock. What a batch makes on the way and the request does not need, extra planks for example, stays in the storage instead of disappearing.
 - Recipes whose result or ingredients the game decides while it runs (dyeing, fireworks, banner and map copying, repairing, and the like) are not used.
-- **Special data items never show a craftable amount.** Such a row shows when that stack was last stored instead, because what could be made of an item says nothing about one particular named sword. The crafting catalogue is not even asked about them.
+- **Special data items never show a craftable amount.** Such a row shows how many stacks are in its bag and when the newest of them arrived instead, because what could be made of an item says nothing about one particular named sword; a right click opens the bag. The crafting catalogue is not even asked about them.
 - The empty boxes of a full-box withdrawal are taken in the order **plain boxes in storage, then boxes crafted for the request, and only then the other colours**: a box that can be crafted is never passed over in favour of a coloured one, and when not all of them can be crafted, the colours cover what is left. The screen says how many stored boxes are used and how many are crafted before the confirm button is pressed.
 - The withdrawal screen lists what will be crafted before the confirm button is pressed.
 - On a very large storage a row's amount may take a moment to appear: a tick only ever spends a short while working craftable amounts out, so the rows a page shows fill in over the next tick or two instead of stalling the server. Once worked out they are remembered until the contents change, and a row that is still waiting keeps the answer its pile's reach gives it rather than disappearing.
@@ -214,7 +266,7 @@ In `REMOTE` mode nothing is drained: the bound containers keep their items, so t
 
 - A **named shulker box** goes in as it is, contents and all: the storage never opens it, and it comes back out unchanged. An unnamed box is opened, so what it holds joins the storage and only the empty box is kept.
 - A **named empty box is never used as packaging material** for a full-box withdrawal, even though it is empty: boxes for packing are taken from the unnamed plain boxes, crafted if those run out, and from the other colours only after that.
-- Any stack whose components no creative tab entry describes — a **custom name** on anything, stored enchantments, written books and the like — is listed under **Special Data Items**, which is always reachable in the category pager and shows nothing but the paper while it holds nothing. That category is capped and can be filtered; see [Special Data Items](#special-data-items).
+- Any stack whose components no creative tab entry describes — a **custom name** on anything, stored enchantments, written books and the like — is listed under **Special Data Items** as a bag, one row per item, and the row is drawn as the newest stack that arrived in it, marked off by two yellow rules that say so. A variant that can hold more than one piece pools with the copy already there, so it is one stack in that bag. That category is always reachable in the category pager and shows nothing but the paper while it holds nothing. A bag is capped and can be filtered; see [Special Data Items](#special-data-items).
 
 ---
 
@@ -276,6 +328,25 @@ Some modded containers split one inventory over several blocks and give every pa
 
 `en_us`, `zh_cn` and `zh_tw` ship with the mod. Any other locale is discovered at runtime from `assets/ultimate-storage/lang/<locale>.json` inside the mod, as long as the filename matches `[a-z0-9][a-z0-9_-]*` and the file contains a non-blank `ults.language.name`; `en_us.json` is required as the fallback. A missing key falls back to English and is reported in the server log.
 
+#### Searching by name
+
+An item's name only exists on the client: the server sends the translation key and the client fills in the words of the language it is set to. A search is typed on the client and answered on the server, so the server has to know the words — and a dedicated server's own files carry **English only**. The mod therefore reads names from four places, lowest first, and answers a search in **the language the searching player's own client reports to the server**:
+
+| Source | What it brings |
+|--------|----------------|
+| The game's own files, read at runtime | English, which a dedicated server always has. |
+| `assets/ultimate-storage/itemnames/<locale>.json`, baked at build time | The words the game itself gives its items, for **every language the mod ships** (`en_us`, `zh_cn` and `zh_tw` today). |
+| The language files of every loaded mod | Each mod's own items, in whatever languages that mod ships. |
+| `config/ults/lang/<locale>.json` | Whatever a server owner drops in: another language entirely, or a correction of their own. It wins over everything else. |
+
+- A language is always read on top of English, the way the client does it, so a word a language does not carry falls back to its English one instead of going missing.
+- **A search reads the category it is typed in.** Select Redstone Blocks, search for `ore`, and the matches are redstone blocks; the filter screen's count is the number of rows that category will show.
+- **A bag is searched by what is inside it.** A bag row shows one stack but stands for all of them, so in **Special Data Items** it is kept when any stack stored in it answers the search, and opening it lays out exactly those stacks and hides the rest. Searching `锋利` there therefore finds the bag of enchanted books and opens onto the books that carry it. While a search is on the row counts what that search kept, `In this bag, matching: 1`, which is what opening it will lay out — the bag screen's own answer and not a second guess at it.
+- **What a stack carries is searched too**, in the player's own language and by the ids behind it: `锋利` and `sharpness` both find the enchanted book holding that enchantment, a potion is found by its effect, a banner by its pattern — anything the tooltip says, because that is what is being matched.
+- **An item id is always searched too** (`diamond`, `minecraft:diamond`), which is what makes the search work on a server with no language data for that player at all.
+- Names are the ones the item really carries: a custom name is searched as it was written, and a name built out of other names — a potion, a spawn egg — is put together before it is matched.
+- The tables are baked from the Minecraft assets Loom already downloaded, so they follow the version in `gradle.properties` on their own — and **which languages are baked is read from the mod's own language files**, so dropping `ja_jp.json` into `assets/ultimate-storage/lang` is all it takes to have Japanese item names baked as well (English comes out of the game jar rather than the asset index). A language the game has no words for is reported and skipped, and a build without those files simply leaves the game's own English names in place. `/ults reload` rereads everything, `config/ults/lang` included.
+
 ---
 
 ## Container Inputs
@@ -309,16 +380,19 @@ Look at a container and run `/ults bind`; the note is free text of at most 64 ch
 
 `/ults` opens a 9×6 screen. The left column is the category pager: an up arrow, four category buttons and a down arrow. The next column is a divider, and the remaining 5×7 area shows up to 35 item rows per page. The top row of that area holds the previous-page arrow, a status book and the next-page arrow; while a single page is left, both item arrows are left out completely, because there is nowhere to turn to. The category arrows are always shown.
 
-- **Categories** are the creative tabs discovered when the world loads, plus **All Items** and **Special Data Items** (stored stacks whose components no creative tab describes). Tabs that hold nothing listable in the current visibility mode are hidden, while **All Items** and **Special Data Items** always stay reachable, even while they are empty. A list without a single row shows a paper in the middle of the item area instead. The special rows are listed newest first, in both the special category and the tail of **All Items**.
-- **Status book** shows the selected category, the category page, the item page, how many item types are listed and stored, how many special entries are held out of the cap and how many pages those are, the current filter and the current visibility; left-clicking it opens the **filter screen**, where a part of an item id (for example `diamond`) is typed, applied, or cleared, and right-clicking it switches the visibility mode this player sees. The special count turns red once the cap is reached, which is when a new special stack starts destroying the oldest one.
-- **Item rows** show the stored amount, the equivalent in shulker boxes once it reaches a box, and open the **withdrawal screen** on a left click while something is stored or automatic crafting could make the item right now. A special row shows **when that stack was last stored** in place of a craftable amount, and is openable whenever something is stored.
-- The selected category, category page, item page, filter and visibility are saved per player in the world data, so everyone returns to their own view.
+- **Categories** are the creative tabs discovered when the world loads, plus **All Items** — every other category added up, with the bags at the end — and **Special Data Items**, which holds only the stored stacks whose item no category lists at all. Tabs that hold nothing listable in the current visibility mode are hidden, while **All Items** and **Special Data Items** always stay reachable, even while they are empty. A list without a single row shows a paper in the middle of the item area instead. A bag row stands for one item and every variant of it, is ordered by when the newest stack of it arrived, is drawn as that newest stack with its own lines set into it, and is marked off by its short yellow rules, in the special category and in the tail of **All Items** alike. While a search is on it counts what that search kept instead of what the bag holds.
+- **Status book** shows the selected category, the category page, the item page, how many item types are listed and stored, how many bags there are and how full the fullest one is, the current filter and the current visibility; left-clicking it opens the **filter screen**, where part of what an item is or what it carries is typed, applied, or cleared, and right-clicking it switches the visibility mode this player sees. **A search reads the category it is typed in** — select Redstone Blocks, search, and the matches are redstone blocks — and it answers by item name, by item id and by **what a stack carries**, so `锋利` or `sharpness` finds the enchanted book holding it and, in the special category, the bag holding that book. The count appears while something is typed and is the number of rows that category will show, so the number and the listing can never disagree. The fullest bag turns red once it is full, which is when a new stack starts destroying the oldest one. See [Searching by name](#searching-by-name).
+- **Item rows** show the stored amount and the equivalent in shulker boxes once it reaches a box, and say what a click does: **left takes one stack right there** — as much as the stack holds, or everything there is when there is less than one, crafted first while automatic crafting is on and a station is stored — and **right asks how many**, opening the **withdrawal screen**. That screen always opens, even when a single piece is all there is: how much leaves is the player's answer to give, and the screen says what there is before anything moves. Then shift and a left click packs a **whole shulker box** of it, and shift and a right click takes **everything** — which asks first, and offers the answer with or without crafting. A **bag row** is the exception: it answers one click, a right click that opens the **bag**, because the stack it is drawn as is only the newest one inside and not the bag itself. See [Special Data Items](#special-data-items), [Bag Screen](#bag-screen) and [Taking everything](#taking-everything).
+- **The hints never promise more than the storage can do.** A row lists every click it answers, and the ones it cannot serve are left out rather than shown greyed. The left line always names the number a click takes — `Left-click: take 64.`, or the few that are left while there are fewer than a stack of them. The `Shift + left-click: take a full shulker box.` line is left out altogether while a full box could not be packed — not enough of the item, no box stored or craftable, or the item being a shulker box itself — so a row then only offers taking everything. A **bag row lists the one line it answers**, `Right-click: open the bag.`, and nothing about a left click or a shift click, because none of them does anything there. A click that arrives after the storage changed under it is still answered, and from the storage as it stands: it takes what is really there, and the row redraws with the new number. Packing a box that cannot be filled says `Not enough stored or craftable to fill a box.` in red and takes nothing.
+- **The lines list every click at once rather than following the shift key**, and that is a limit of the game rather than a choice: opening a screen makes the client release every key and stop tracking them, so the input it reports to the server says "no shift" however the player holds the key. The server therefore cannot redraw the hints when shift is pressed, and a row says everything it answers instead. Shift clicks themselves work as always, because the click itself carries the key state.
+- Whatever a click takes goes into the backpack the way a withdrawal does: what does not fit is refused with a message, or dropped on the ground with `input.allowFullInventory` on.
+- The selected category, category page, item page, filter and visibility are saved per player in the world data, so everyone returns to their own view — **and a withdrawal does not lose it**: the screen comes back exactly where it was.
 - Clicking plays a short sound that only the clicking player hears: a light click for opening, paging, selecting and switching, and a brighter pickup sound for applying or confirming. Cancelling a screen stays silent.
-- Open screens refresh themselves when stored quantities change.
+- Open screens refresh themselves when stored quantities change, and the craftable amounts with them. Those answers are allowed to be a moment old while a storage is taking arrivals every tick — working the whole craft graph out again per tick is what the search will not do — but such an answer is never left standing: a screen redraws until the amounts match the contents again, and a **click** never waits at all, it asks the storage as it stands rather than for the amount the row was drawn with.
 
 ### Withdrawal Screen
 
-The withdrawal screen asks for an amount above an anvil-style input and offers two modes:
+A **left click on a row takes a stack right away**; this screen is what a **right click** opens, and it opens for every row that has anything to give, a single piece included: how much leaves is a question only the player answers, so there is no amount small enough to skip asking. It asks for an amount above an anvil-style input and offers two modes:
 
 | Mode           | Meaning                                                                                                    |
 |----------------|------------------------------------------------------------------------------------------------------------|
@@ -328,6 +402,46 @@ The withdrawal screen asks for an amount above an anvil-style input and offers t
 The left slot of the anvil holds the cancel button, which returns to the storage screen, and the middle slot switches between the two modes. The middle slot also reports what the request needs: the stored amount, the amount asked for, how many items and how many boxes would be crafted, and in full-box mode how many empty boxes are available and how many of them are used. The cancel label is the first tooltip line of that button rather than its name, because the vanilla client copies the name of the item in this slot into the input field: a name would fill the field with the sentence and every later keystroke would be appended to it. Confirmation stays unavailable and explains itself while the request cannot be fulfilled: a non-positive amount, packing shulker boxes inside shulker boxes, more than 36 result stacks, not enough stored items or empty boxes, or a backpack that cannot hold the complete result. Confirming revalidates everything and deducts atomically, so two players cannot withdraw the same items. With `input.allowFullInventory` on, a backpack that cannot hold the complete result no longer blocks the request: the confirmation button says so in red, and whatever does not fit is dropped on the ground as an item.
 
 The filter screen uses the same three slots: cancel, clear the filter, and apply what was typed.
+
+### Bag Screen
+
+A bag row's bag is opened by a **right click** on the row, and that is the only thing the row does: it answers no left click and no shift click, because the stack it is drawn as is only the newest one inside. Everything is taken from inside the bag, which is where the box is packed and where the bag is emptied from. The bag screen is a roomy 9×6 screen whose top five rows are **the stored stacks themselves**, one stored stack to a slot, newest first: **forty-five to a page**, and therefore three pages for a full bag at the default capacity.
+
+- **A slot shows one piece and its lore says how many are there**, whatever the stack holds: a bag reads as rows of one thing each — the row says `Stored: 64` — rather than as a row of numbers, and holds for a thing that does not stack just the same.
+- **A stack inside the bag behaves exactly like a row of the storage screen**, because it is one: a left click takes one stack of it, a right click asks how many, shift and a left click packs a whole shulker box, and shift and a right click takes everything of that stack. There is no separate way of taking things out of a bag, and the lines are the same smart ones: the left line says how much of that stack is really left while it is less than a stack, and the box line only appears while a full box could really be packed.
+- **The bag row itself is drawn as the stack that arrived last, contents and all.** Hovering it reads what that stack really is — its name, the enchantments on it, the lore written on it, the damage and speed it adds — colours and numbers and all, because those are the lines the game itself draws on that stack. Two things make that read like a hover a player knows:
+  ```
+  【附魔书】收纳袋
+  ───── 最新 ─────
+  附魔书
+  锋利 V
+  ──────────────
+  袋中符合筛选：1
+  最近存入：2026-09-28 22:26
+  右键：打开收纳袋。
+  ```
+  - **The title names the bag, not the stack**: the item every stack in it is a kind of, in brackets, with the word for a bag after it. A bag of differently named netherite swords is a bag of netherite swords however its newest one is called. The line is built from the item's own name *component* rather than from finished words, so a Chinese client reads `【附魔书】收纳袋` and an English one `[Enchanted Book] Bag`.
+  - **The lines under it are the stack's own, worked out for the reader.** The game asks the player for the base values behind a weapon's damage and speed, so the same stack read without a player says `-2.4 Attack Speed` where the client says `1.6 Attack Speed`; the row hands the player in, so what it prints is what the hover prints. Nothing is added between those lines and nothing is taken out — a stack whose own lines hold a gap keeps it, one whose lines run straight on runs straight on — so the block reads exactly as the hover does.
+- **That first line is coloured by the game, which is why the icon is not quite the stored stack.** The game paints a stack's name line by its **rarity** and drops whatever style was set on it, and it raises the rarity of anything enchanted — so a title styled yellow comes out aqua on a cursed item and white on a plain one. The icon is therefore the newest stack with its enchantments taken off and the rarity set to the one whose colour *is* yellow; the enchantments are still drawn, from the row's own lines, and the glint they gave it is asked for by hand in their place. Nothing else changes — it is a display copy, and a click hands over the stored stack itself.
+- **The search that found the bag is still on inside it.** Opening a bag in the special category lays out the stacks the search kept and hides the rest, so a bag found by `锋利` opens onto the books that carry it; the book in the bottom row names that search and glints while one is on. While a search is on the row above says one number and one only — how many of the bag's stacks it kept, which is what opening the bag will lay out — because that is what a player looking at a filtered listing is asking about; with no search it says how many the bag holds. Both are the bag screen's own answer, not a second guess at it.
+- What a click takes goes into the backpack the way a withdrawal does: what does not fit is refused with a message, or dropped on the ground with `input.allowFullInventory` on. The storage follows immediately: what was handed over is no longer stored from that moment.
+- The bottom row holds the way back to the storage, **the page arrows on either side of the status book** while more than one page is filled, and that book: it shows how many stacks the bag holds, which page is shown and which search is on, and a **right click on it asks to take the whole bag** — every stack in it, which is where emptying a bag belongs. A bag that is emptied simply shows the paper in the middle — or, while a search is on, a paper saying that nothing in it matches — and the row behind it disappears from the storage screen as soon as nothing of that item is left.
+- Bags refresh themselves while the storage changes, exactly like the other screens: an arrival joins the front, a stack the filter destroys leaves, and the page a player is on is kept.
+- In `REMOTE` mode a bag can only hand things over, never take them in: what leaves a bag is taken out of the bound containers it came from, and a container that ran dry in the meantime simply leaves the bag as it really is.
+
+### Taking everything
+
+Shift and a right click asks to empty a stock out, and that is a question rather than a command: **three buttons centred in one row** — the way back at slot 3, the mode at slot 5, the confirmation at slot 7. It is a plain container and not the anvil screen the amount screen uses, because there is nothing to type here and a screen that cannot be typed into beats one whose field has to be kept empty. The way back is the **same red dye the anvil screens carry**, with its label on the first tooltip line, so leaving a screen looks the same wherever it is done.
+
+| Mode | What it takes |
+|------|---------------|
+| Item mode | Every piece stored, and nothing else. Not offered while nothing is stored. |
+| Crafting table mode | Every piece stored, plus everything the recipes and the stored station can add to it. Not offered while nothing can be crafted. |
+
+The middle slot switches between the two and reports what each of them means: how much is stored, how much could be crafted right now, and how much this mode would take. Nothing leaves until the confirmation on the right is clicked.
+
+- Inside a bag, the status book offers taking **the whole bag**: every stack in it leaves as the thing it is. A bag holds what somebody put in, which no recipe makes, so there the crafting answer is not on offer.
+- What leaves is handed over the way a withdrawal is, except that the overflow is dropped rather than put back: a player who asked for everything gets everything, and half of an answer is not one.
 
 ---
 
@@ -341,13 +455,13 @@ Bound blocks are protected: breaking one requires sneaking. A normal break attem
 
 ## World Data
 
-Bindings and per-player view profiles are stored in the overworld `SavedData` of the world, so **each world has its own storage** and copying a world copies its storage. Nothing is written into container or player NBT. In `VOID` mode the stored items live in that same world data; in `REMOTE` mode they stay where they are, inside the bound containers. Every stored kind also remembers when it was last put in, which is what the special category sorts, displays and trims by; a save written before that stamp existed still loads, its entries simply count as the oldest.
+Bindings and per-player view profiles are stored in the overworld `SavedData` of the world, so **each world has its own storage** and copying a world copies its storage. Nothing is written into container or player NBT. In `VOID` mode the stored items live in that same world data; in `REMOTE` mode they stay where they are, inside the bound containers. Every stored stack remembers when it was put in, which is what the special category lists, displays, sorts and trims by; a save written before that stamp existed still loads, its stacks simply count as the oldest. In `REMOTE` mode the containers themselves cannot tell two identical named swords apart, so a bag holds the variants it finds there, one entry per combination of components.
 
 ---
 
 ## Cloth Config Support
 
-With **Cloth Config API** and **Mod Menu** installed on a client, every setting can be changed in-game. The screen is split into **General**, **Storage** and **Special items** tabs, each mirrored inside an **All** overview. The screen edits only that client's local `config/ults.json`; it cannot modify a remote dedicated server. Saving validates and atomically writes UTF-8 JSON, and a block id or item id that names nothing in the running game is highlighted while typing and blocks the save. The item filter list is edited with the same numbered, validating list widget the multi block container list uses. Run `/ults reload` on an integrated server to apply the file.
+With **Cloth Config API** and **Mod Menu** installed on a client, every setting can be changed in-game. The screen is split into **General**, **Storage** and **Special items** tabs, each mirrored inside an **Overview** tab. Every label is short and every tooltip is laid out the same way — a one-line summary, a blank line, the detail, and an example where one helps — so a setting is readable without reading a paragraph. The screen edits only that client's local `config/ults.json`; it cannot modify a remote dedicated server. Saving validates and atomically writes UTF-8 JSON, and a block id or item id that names nothing in the running game is highlighted while typing and blocks the save. The item filter list is edited with the same numbered, validating list widget the multi block container list uses. Run `/ults reload` on an integrated server to apply the file.
 
 ---
 
@@ -360,6 +474,8 @@ With **Cloth Config API** and **Mod Menu** installed on a client, every setting 
 ```
 
 Java 25 is required.
+
+`build` also bakes the game's own item names into the jar for **every language the mod ships** — `en_us`, `zh_cn` and `zh_tw` at the moment, read from the files in `assets/ultimate-storage/lang` (task `generateItemNames`, output `build/generated/ultsItemNames`) — so that a search can be answered in the language the player's client draws items in. The words are taken from the Minecraft assets Loom has already downloaded, or from the game jar in the Loom cache for the languages the asset index does not carry; a build without them simply leaves the game's English names in place. See [Searching by name](#searching-by-name).
 
 ---
 

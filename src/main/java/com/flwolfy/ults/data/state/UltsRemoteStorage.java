@@ -48,7 +48,7 @@ public final class UltsRemoteStorage {
 
     public long amount(ItemStack template) {
       for (UltsStoredView view : items) {
-        if (ItemStack.isSameItemSameComponents(view.template(), template)) {
+        if (UltsStackKinds.same(view.template(), template)) {
           return view.amount();
         }
       }
@@ -136,7 +136,7 @@ public final class UltsRemoteStorage {
         view.template().getItem(), key -> new ArrayList<>());
     for (int index = 0; index < variants.size(); index++) {
       UltsStoredView existing = variants.get(index);
-      if (ItemStack.isSameItemSameComponents(existing.template(), view.template())) {
+      if (UltsStackKinds.same(existing.template(), view.template())) {
         variants.set(index, new UltsStoredView(
             existing.template(), existing.amount() + view.amount(), existing.special()));
         return;
@@ -198,7 +198,7 @@ public final class UltsRemoteStorage {
       long used = before.amountAt(index) - after.amount(kind);
       if (used > 0L && !extract(
           server, bindings,
-          stack -> ItemStack.isSameItemSameComponents(stack, kind), used, removed)) {
+          stack -> UltsStackKinds.same(stack, kind), used, removed)) {
         restore(server, bindings, removed);
         return List.of();
       }
@@ -313,6 +313,9 @@ public final class UltsRemoteStorage {
         container.setChanged();
         continue;
       }
+      // Putting something back into a container is the game's own business, not the storage's: two
+      // stacks only share a slot when every component agrees, whatever the stacking rule says about
+      // what the storage treats as one kind of thing.
       if (!ItemStack.isSameItemSameComponents(existing, pending)) {
         continue;
       }

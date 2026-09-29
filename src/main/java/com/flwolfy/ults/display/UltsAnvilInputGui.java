@@ -26,15 +26,21 @@ import net.minecraft.world.item.Items;
  */
 abstract class UltsAnvilInputGui extends AnvilInputGui {
 
+  private static final int INPUT_SLOT = 0;
   private static final String CANCEL_KEY = "ults.anvil.cancel";
 
   UltsAnvilInputGui(ServerPlayer player, boolean manipulatePlayerSlots) {
     super(player, manipulatePlayerSlots);
   }
 
-  /** Places the cancel action in the input slot; call once, when the screen is built. */
+  /**
+   * Places the cancel action in the input slot; call once, after the default input was set.
+   *
+   * <p>The order matters: setting the default input writes the input slot itself, so a screen that
+   * wants its own cancel action there has to place it last.
+   */
   protected void showCancelSlot() {
-    setSlot(0, cancelElement());
+    setSlot(INPUT_SLOT, cancelElement());
   }
 
   private GuiElement cancelElement() {
@@ -45,6 +51,6 @@ abstract class UltsAnvilInputGui extends AnvilInputGui {
         .build();
   }
 
-  /** Closes this screen and goes back to the storage screen. */
+  /** Closes this screen and goes back to the screen it came from. */
   protected abstract void cancel();
 }

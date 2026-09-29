@@ -15,15 +15,15 @@ import net.minecraft.world.item.ItemStack;
 /**
  * Which stacks that carry data of their own the storage dismisses.
  *
- * <p>An enchanted or worn tool cannot stack with anything, so it takes a row of the special category
- * for itself. A busy server ends up with hundreds of near identical swords nobody asked for, so the
- * configuration may name the items that are not worth a row. Two sources feed that list: the ids a
- * server owner writes down, and, when it is switched on, every piece of equipment a loot table can
- * drop, which is what fills those rows in the first place.
+ * <p>A stack that carries data of its own — an enchanted or worn tool, a brew, a book somebody wrote in
+ * — is a kind of thing of its own, so a busy server ends up with hundreds of near identical swords
+ * nobody asked for. The configuration may name the items that are not worth keeping. The filter names
+ * them by item id and nothing else: what is not written down is kept, so a server that wants a farm's
+ * gear gone writes that gear down.
  *
- * <p>A plain stack of the same item is never touched: it stacks with its own kind, so it is not
- * special and never reaches this rule. Neither is a stack a player renamed, which is somebody's own
- * thing rather than anonymous loot.
+ * <p>A plain stack of the same item is never touched: it is the pile of its item, exactly like every
+ * other plain stack, and there is nothing about it to dismiss. Neither is a stack a player renamed,
+ * which is somebody's own thing rather than anonymous loot.
  *
  * <h2>What dismissing means</h2>
  *
@@ -40,37 +40,28 @@ import net.minecraft.world.item.ItemStack;
  */
 public final class UltsSpecialFilters {
 
-  /** Items the configuration names itself. */
+  /** Items the configuration names itself by id. */
   private static volatile Set<Item> declared = Set.of();
-  /** Equipment a loot table can drop, when the configuration asks for those too. */
-  private static volatile Set<Item> lootEquipment = Set.of();
 
   private UltsSpecialFilters() {}
 
-  /**
-   * Reads the configured ids and takes the loot table equipment with them.
-   *
-   * <p>Called at startup and on {@code /ults reload}, after the survival catalogue has read the loot
-   * tables.
-   *
-   * @param equipment what the loot tables drop and a player can wear or wield
-   */
-  public static void rebuild(Set<Item> equipment) {
+  /** Reads the configured ids. Called at startup and on {@code /ults reload}. */
+  public static void rebuild() {
     Set<Item> items = new HashSet<>();
     for (String id : UltsConfigManager.getInstance().data().special().filters()) {
       UltsItemIds.resolve(id).ifPresentOrElse(items::add, () ->
           UltsMod.LOGGER.warn("UltStorage: the special filter names no item of this game: {}", id));
     }
     declared = Set.copyOf(items);
-    lootEquipment = Set.copyOf(equipment);
   }
 
   /**
    * Whether the storage dismisses this stack.
    *
-   * <p>Only a stack that would otherwise take a special row can be dismissed; a plain stack of the
-   * same item is left alone, however its item is listed. Callers then throw the stack away in void
-   * mode, or leave it out of a listing in remote mode.
+   * <p>Only a stack that carries data of its own is at stake: it is a kind of thing of its own, and one
+   * the configuration can decide it does not want. A plain stack of the same item is the pile of that
+   * item and is left alone, however its item is listed. Callers then throw the stack away in void mode,
+   * or leave it out of a listing in remote mode.
    *
    * <p>A stack a player gave a name to is never dismissed. Renaming something is a deliberate act —
    * the stack is somebody's, not anonymous loot — so the filter has no business with it, whatever the
@@ -91,13 +82,12 @@ public final class UltsSpecialFilters {
     if (!special.filterMode().active()) {
       return false;
     }
-    Item item = stack.getItem();
-    if (!declared.contains(item)
-        && !(special.filterLootEquipment() && lootEquipment.contains(item))) {
+    if (!declared.contains(stack.getItem())) {
       return false;
     }
-    // A stack the catalogue knows is the plain one: it stacks with its own kind, so it is not special
-    // and the filter has no business with it.
+    // A stack a category can show is that category's business: it pools with its own kind and never
+    // takes a bag, so the filter has nothing to dismiss. What is left is the data a stack brought with
+    // it, which is exactly what a bag would have kept.
     if (UltsCreativeCatalog.contains(stack)) {
       return false;
     }
@@ -105,17 +95,12 @@ public final class UltsSpecialFilters {
       return true;
     }
     // Keeping what is at full durability is the point of the middle mode: a pristine item is still
-    // worth a row, a worn one is not.
+    // worth keeping, a worn one is not.
     return stack.isDamaged();
   }
 
   /** How many items the filter names, for the log and the configuration screen. */
   public static int declaredSize() {
     return declared.size();
-  }
-
-  /** How many equipment items the loot tables add to the filter. */
-  public static int lootEquipmentSize() {
-    return lootEquipment.size();
   }
 }

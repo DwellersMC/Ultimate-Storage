@@ -1,5 +1,7 @@
 package com.flwolfy.ults.display;
 
+import com.flwolfy.ults.data.lang.UltsItemNames;
+import com.flwolfy.ults.data.state.UltsStackKinds;
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
@@ -89,9 +91,21 @@ public final class UltsCreativeCatalog {
         .orElseGet(() -> categories.isEmpty() ? null : categories.getFirst());
   }
 
+  /**
+   * Whether some category lists this stack, in the sense the configured stacking rule gives that word.
+   *
+   * <p>This is what decides whether a category can show a stored stack at all. With the components rule
+   * a netherite sword is the combat tab's business and an enchanted one is not, because no tab entry is
+   * that exact stack; with the tooltip rule it is enough that a tab entry would read the same, so a
+   * sword that is merely more worn than the tab's own still belongs to its item. What no category holds
+   * goes to the special category, where a bag keeps it.
+   *
+   * @param stack the stack in question
+   * @return whether a category lists it
+   */
   public static boolean contains(ItemStack stack) {
     return normalItems.getOrDefault(stack.getItem(), List.of()).stream()
-        .anyMatch(candidate -> ItemStack.isSameItemSameComponents(candidate, stack));
+        .anyMatch(candidate -> UltsStackKinds.same(candidate, stack));
   }
 
   /**
@@ -103,19 +117,8 @@ public final class UltsCreativeCatalog {
   }
 
   // Expects a filter already trimmed and lower-cased.
-  public static boolean matches(ItemStack template, String filter) {
-    if (filter == null || filter.isEmpty()) {
-      return true;
-    }
-    return BuiltInRegistries.ITEM.getKey(template.getItem()).toString()
-        .toLowerCase(Locale.ROOT).contains(filter);
-  }
-
-  public static long matches(String filter) {
-    if (filter == null || filter.isEmpty()) {
-      return allTemplates.size();
-    }
-    return allTemplates.stream().filter(template -> matches(template, filter)).count();
+  public static boolean matches(ItemStack template, String filter, String locale) {
+    return UltsItemNames.matches(template, filter, locale);
   }
 
   private static boolean addUnique(

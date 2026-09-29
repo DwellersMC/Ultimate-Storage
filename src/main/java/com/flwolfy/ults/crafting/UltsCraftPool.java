@@ -268,6 +268,20 @@ public final class UltsCraftPool {
     keptAmount = keptIndex < 0 ? 0L : amount;
   }
 
+  /** The keep rule as it stands, so a caller can put it back after asking its own question. */
+  public Keep keepState() {
+    return new Keep(keptIndex, keptAmount);
+  }
+
+  /** Puts back a keep rule taken by {@link #keepState()}. */
+  public void restoreKeep(Keep state) {
+    keptIndex = state.index();
+    keptAmount = state.amount();
+  }
+
+  /** A snapshot of the keep rule; see {@link #keepState()}. */
+  public record Keep(int index, long amount) {}
+
   /** How many empty boxes the pile holds. */
   public long packableAmount() {
     long total = 0L;

@@ -18,13 +18,21 @@ public final class UltsWithdrawSGUI extends UltsAnvilInputGui {
   private static final List<WeakReference<UltsWithdrawSGUI>> OPEN_MENUS = new ArrayList<>();
   private final UltsRuntime runtime;
   private final ItemStack template;
+  /** What this screen came from, so that leaving it lands where the player was. */
+  private final Runnable returnTo;
   private boolean boxed;
   private long renderedRevision = -1;
 
-  private UltsWithdrawSGUI(ServerPlayer player, UltsRuntime runtime, ItemStack template) {
+  private UltsWithdrawSGUI(
+      ServerPlayer player,
+      UltsRuntime runtime,
+      ItemStack template,
+      Runnable returnTo
+  ) {
     super(player, false);
     this.runtime = runtime;
     this.template = template.copyWithCount(1);
+    this.returnTo = returnTo;
     setTitle(UltsGuiText.text("ults.withdraw.title"));
     setLockPlayerInventory(true);
     setDefaultInputValue("");
@@ -35,8 +43,23 @@ public final class UltsWithdrawSGUI extends UltsAnvilInputGui {
     render();
   }
 
+  /** Opens the amount screen on an item of the storage screen, which is where it comes back to. */
   public static void open(ServerPlayer player, UltsRuntime runtime, ItemStack template) {
-    new UltsWithdrawSGUI(player, runtime, template).open();
+    open(player, runtime, template, () -> UltsStorageSGUI.open(player, runtime));
+  }
+
+  /**
+   * Opens the amount screen and says where leaving it goes.
+   *
+   * @param returnTo what to open once this screen is done with, which is the screen it came from
+   */
+  public static void open(
+      ServerPlayer player,
+      UltsRuntime runtime,
+      ItemStack template,
+      Runnable returnTo
+  ) {
+    new UltsWithdrawSGUI(player, runtime, template, returnTo).open();
   }
 
   public static void refreshAll(UltsRuntime runtime) {
@@ -72,7 +95,7 @@ public final class UltsWithdrawSGUI extends UltsAnvilInputGui {
     // A full inventory only blocks the request while the configuration says it should; with the
     // option on the player would rather have the rest on the floor than not have it at all.
     boolean overflowToGround = runtime.allowFullInventory();
-    boolean inventorySpace = plan.available() && canFit(plan.outputs());
+    boolean inventorySpace = plan.available() && canFit(player, plan.outputs());
     boolean confirmable = plan.available() && (inventorySpace || overflowToGround);
 
     ItemStack availableBox = runtime.availableBox();
@@ -141,13 +164,13 @@ public final class UltsWithdrawSGUI extends UltsAnvilInputGui {
   @Override
   protected void cancel() {
     close();
-    UltsStorageSGUI.open(player, runtime);
+    returnTo.run();
   }
 
   private void confirm(int quantity, boolean overflowToGround) {
     synchronized (runtime.state()) {
       UltsWithdrawalPlan plan = runtime.withdrawalPlan(template, quantity, boxed);
-      if (!plan.available() || !(canFit(plan.outputs()) || overflowToGround)) {
+      if (!plan.available() || !(canFit(player, plan.outputs()) || overflowToGround)) {
         render();
         return;
       }
@@ -156,26 +179,14 @@ public final class UltsWithdrawSGUI extends UltsAnvilInputGui {
         render();
         return;
       }
-      for (ItemStack output : outputs) {
-        player.getInventory().add(output);
-        if (!output.isEmpty()) {
-          // What the inventory could not take goes on the ground, which is what the option is for.
-          // Without it this only happens in remote mode, where there is no void pool to put a stack
-          // back into; the void store would otherwise swallow it again.
-          if (overflowToGround || runtime.remote()) {
-            player.drop(output, false);
-          } else {
-            runtime.state().deposit(output);
-          }
-        }
-      }
+      UltsGuiGive.hand(player, runtime, outputs, overflowToGround);
     }
     player.sendSystemMessage(UltsTextBuilder.success(UltsTextBuilder.format(
         UltsGuiText.text(boxed ? "ults.withdraw.success.box" : "ults.withdraw.success.item"),
         UltsTextBuilder.TEXT, UltsTextBuilder.HIGHLIGHT,
         quantity, template.getHoverName().getString())));
     close();
-    UltsStorageSGUI.open(player, runtime);
+    returnTo.run();
   }
 
   private Component problem(UltsWithdrawalPlan plan, Integer quantity) {
@@ -198,7 +209,8 @@ public final class UltsWithdrawSGUI extends UltsAnvilInputGui {
     return UltsGuiText.text("ults.withdraw.problem.inventory");
   }
 
-  private boolean canFit(List<ItemStack> outputs) {
+  /** Whether the backpack can take the whole result, which the special bag asks as well. */
+  static boolean canFit(ServerPlayer player, List<ItemStack> outputs) {
     List<ItemStack> slots = new ArrayList<>(36);
     for (int slot = 0; slot < 36; slot++) {
       slots.add(player.getInventory().getItem(slot).copy());

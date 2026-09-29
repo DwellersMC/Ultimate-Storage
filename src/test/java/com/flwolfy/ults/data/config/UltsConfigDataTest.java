@@ -64,16 +64,17 @@ class UltsConfigDataTest {
   }
 
   @Test
-  void theSpecialCapIsTenPagesOfRows() {
-    // The setting is a count; the pages a player sees are worked out from it.
-    assertEquals(35, UltsConfigData.SPECIAL_PAGE_SIZE);
-    assertEquals(10, UltsConfigData.DEFAULT_SPECIAL_PAGES);
-    assertEquals(350, UltsConfigData.DEFAULT.special().maxEntries());
+  void aBagStartsAtThreePagesOfTheGrid() {
+    // The setting is a count of stacks; the pages a player pages through are worked out from it, and
+    // the grid is the one the bag screen really draws — forty-five to a page, five rows of nine.
+    assertEquals(45, UltsConfigData.BUNDLE_PAGE_SIZE);
+    assertEquals(120, UltsConfigData.DEFAULT_BUNDLE_SLOTS);
+    assertEquals(120, UltsConfigData.DEFAULT.special().bundleSlots());
     assertEquals(0, UltsConfigData.pagesOf(0));
     assertEquals(1, UltsConfigData.pagesOf(1));
-    assertEquals(1, UltsConfigData.pagesOf(35));
-    assertEquals(2, UltsConfigData.pagesOf(36));
-    assertEquals(10, UltsConfigData.pagesOf(350));
+    assertEquals(1, UltsConfigData.pagesOf(45));
+    assertEquals(2, UltsConfigData.pagesOf(46));
+    assertEquals(3, UltsConfigData.pagesOf(120));
   }
 
   @Test
@@ -82,7 +83,7 @@ class UltsConfigDataTest {
     assertFalse(UltsConfigData.DEFAULT.special().filterMode().active());
     assertTrue(UltsSpecialFilter.KEEP_FULL_DURABILITY.active());
     assertTrue(UltsSpecialFilter.FILTER_ALL.active());
-    assertFalse(UltsConfigData.DEFAULT.special().filterLootEquipment());
+    // Nothing is filtered unless an id is written down: the equipment switch is gone.
     assertEquals(List.of(), UltsConfigData.DEFAULT.special().filters());
   }
 
@@ -92,13 +93,13 @@ class UltsConfigDataTest {
         UltsConfigData.DEFAULT.general(),
         UltsConfigData.DEFAULT.input(),
         new UltsConfigData.Special(
-            12, true, UltsSpecialFilter.FILTER_ALL,
+            24, UltsStackRule.TOOLTIP, UltsSpecialFilter.FILTER_ALL,
             List.of("  Minecraft:Iron_Sword ", "minecraft:iron_sword", "minecraft:golden_sword")));
     UltsConfigData clean = data.canonicalize();
     assertEquals(List.of("minecraft:iron_sword", "minecraft:golden_sword"),
         clean.special().filters());
-    assertEquals(12, clean.special().maxEntries());
-    assertTrue(clean.special().filterLootEquipment());
+    assertEquals(24, clean.special().bundleSlots());
+    assertEquals(UltsStackRule.TOOLTIP, clean.special().stackRule());
     assertEquals(UltsSpecialFilter.FILTER_ALL, clean.special().filterMode());
   }
 }

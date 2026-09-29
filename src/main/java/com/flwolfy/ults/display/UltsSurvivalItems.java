@@ -114,8 +114,6 @@ public final class UltsSurvivalItems {
   );
 
   private static volatile Set<Item> obtainable = Set.of();
-  /** Equipment the loot tables can drop, which is what the special item filter may destroy. */
-  private static volatile Set<Item> lootEquipment = Set.of();
   /** Which values of a component kind survival can produce, keyed by kind. */
   private static volatile Map<String, Set<String>> typeValues = Map.of();
   /** The enchantment registry of the running server, used to resolve option tags. */
@@ -141,9 +139,6 @@ public final class UltsSurvivalItems {
     // Modded spawn eggs are not in the vanilla spawn egg tab, but are still creative only.
     items.removeIf(item -> BuiltInRegistries.ITEM.getKey(item).getPath().endsWith("_spawn_egg"));
     obtainable = Set.copyOf(items);
-    lootEquipment = Set.copyOf(fromLootTables.stream()
-        .filter(UltsSurvivalItems::isEquipment)
-        .toList());
     Map<String, Set<String>> frozenValues = new HashMap<>();
     values.forEach((kind, known) -> frozenValues.put(kind, Set.copyOf(known)));
     typeValues = Map.copyOf(frozenValues);
@@ -264,23 +259,6 @@ public final class UltsSurvivalItems {
   /** Whether a survival player can obtain this item, whatever its components are. */
   public static boolean obtainable(ItemStack stack) {
     return !stack.isEmpty() && obtainable.contains(stack.getItem());
-  }
-
-  /**
-   * The equipment loot tables can drop: what a player wears or wields, and what fills a structure
-   * chest with near identical, individually stored stacks.
-   *
-   * @return the items, read again on every {@code /ults reload}
-   */
-  public static Set<Item> lootEquipment() {
-    return lootEquipment;
-  }
-
-  /** Whether an item is worn or wielded: equipment is what carries durability. */
-  private static boolean isEquipment(Item item) {
-    Holder<Item> holder = BuiltInRegistries.ITEM.wrapAsHolder(item);
-    return holder.areComponentsBound()
-        && holder.components().has(DataComponents.MAX_DAMAGE);
   }
 
   /** A component kind with the values a catalogue entry carries. */

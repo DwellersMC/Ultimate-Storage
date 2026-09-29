@@ -3,6 +3,7 @@ package com.flwolfy.ults.data.state;
 import com.flwolfy.ults.crafting.UltsCraftPool;
 import com.flwolfy.ults.data.config.UltsConfigManager;
 import com.flwolfy.ults.data.config.UltsCraftingMode;
+import com.flwolfy.ults.data.config.UltsStackRule;
 import com.flwolfy.ults.data.config.UltsStorageMode;
 import com.flwolfy.ults.display.UltsCreativeCatalog;
 import com.mojang.serialization.Codec;
@@ -12,15 +13,19 @@ import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 import net.minecraft.util.datafix.DataFixTypes;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.TooltipFlag;
 import net.minecraft.world.item.component.ItemContainerContents;
 import net.minecraft.world.level.saveddata.SavedData;
 import net.minecraft.world.level.saveddata.SavedDataType;
@@ -163,22 +168,80 @@ public final class UltsState extends SavedData {
   public synchronized List<UltsStoredView> items() {
     return pool.stream()
         .map(entry -> new UltsStoredView(
-            entry.template(), entry.amount(),
-            !UltsCreativeCatalog.contains(entry.template()), entry.updatedAt()))
+            entry.template(), entry.amount(), special(entry.template()), entry.updatedAt()))
         .sorted(Comparator.comparing(
             value -> value.template().getHoverName().getString(), String.CASE_INSENSITIVE_ORDER))
         .toList();
+  }
+
+  /**
+   * Whether a stored stack is one of the special ones, which a bag is kept for.
+   *
+   * <p>A category can only show what its own tabs list, component for component: a netherite sword is
+   * the combat tab's business, an **enchanted** netherite sword is not, because no tab entry is that
+   * exact stack. What a category cannot hold goes to the special category, where one bag keeps every
+   * such stack of one item together. Three identically enchanted swords are still one stack there.
+   */
+  private static boolean special(ItemStack template) {
+    return !UltsCreativeCatalog.contains(template);
   }
 
   /** How many kinds of item the storage holds that carry data of their own. */
   public synchronized int specialCount() {
     int special = 0;
     for (UltsStoredEntry entry : pool) {
-      if (!UltsCreativeCatalog.contains(entry.template())) {
+      if (special(entry.template())) {
         special++;
       }
     }
     return special;
+  }
+
+  /**
+   * The stored rows of one item that carries data of its own, newest first.
+   *
+   * <p>Every row is one arrival: two identical named swords are two rows, because the bag a row opens
+   * is a list of the things themselves rather than of kinds of thing.
+   *
+   * @param item the item in question
+   * @return the rows, newest first
+   */
+  public synchronized List<UltsStoredView> specialsOf(Item item) {
+    return pool.stream()
+        .filter(entry -> entry.template().is(item) && special(entry.template()))
+        .map(entry -> new UltsStoredView(entry.template(), entry.amount(), true, entry.updatedAt()))
+        .sorted(Comparator.comparingLong(UltsStoredView::updatedAt).reversed())
+        .toList();
+  }
+
+  /**
+   * Takes one row of a bag out of the storage, whole.
+   *
+   * <p>A bag hands things over one at a time, and a row is one kind of thing somebody stored, so this
+   * removes exactly that row and leaves every other row of the item, and their times, untouched. The row
+   * is found by its kind, which is what the screen was showing when it was clicked.
+   *
+   * @param item the item whose bag is being taken from
+   * @param stack the stack that is leaving, as the row showed it
+   * @return the row that left, as the stack it was stored as, or an empty stack when there is no such
+   *     row any more
+   */
+  public synchronized ItemStack takeBagRow(Item item, ItemStack stack) {
+    UltsStoredEntry found = null;
+    for (UltsStoredEntry entry : pool) {
+      if (entry.template().is(item)
+          && special(entry.template())
+          && UltsStackKinds.same(entry.template(), stack)) {
+        found = entry;
+        break;
+      }
+    }
+    if (found == null) {
+      return ItemStack.EMPTY;
+    }
+    pool.remove(found);
+    changed();
+    return found.template().copyWithCount((int) Math.min(found.amount(), Integer.MAX_VALUE));
   }
 
   public synchronized void deposit(ItemStack source) {
@@ -252,27 +315,37 @@ public final class UltsState extends SavedData {
   }
 
   /**
-   * Destroys the least recently stored special stacks while the special category is over its cap.
+   * Destroys the least recently stored stacks while a bag holds more than its slots.
+   *
+   * <p>A bag belongs to one item, and so does its cap: every row of one item that carries data of its
+   * own is in that item's bag, whatever it holds, and those rows together are what
+   * {@code special.bundleSlots} bounds. A stack that pools with its kind is therefore counted by the
+   * kind it pooled into, and can hold a whole pile in one slot.
    *
    * @return whether anything was destroyed
    */
   private boolean trimSpecial() {
-    int limit = UltsConfigManager.getInstance().data().special().maxEntries();
-    List<UltsStoredEntry> specials = new ArrayList<>();
+    int limit = UltsConfigManager.getInstance().data().special().bundleSlots();
+    Map<Item, List<UltsStoredEntry>> bags = new LinkedHashMap<>();
     for (UltsStoredEntry entry : pool) {
-      if (!UltsCreativeCatalog.contains(entry.template())) {
-        specials.add(entry);
+      if (special(entry.template())) {
+        bags.computeIfAbsent(entry.template().getItem(), key -> new ArrayList<>()).add(entry);
       }
     }
-    int excess = specials.size() - limit;
-    if (excess <= 0) {
-      return false;
+    boolean trimmed = false;
+    for (List<UltsStoredEntry> bag : bags.values()) {
+      int excess = bag.size() - limit;
+      if (excess <= 0) {
+        continue;
+      }
+      // The least recently stored ones go first: a bag keeps what came in last.
+      bag.sort(Comparator.comparingLong(UltsStoredEntry::updatedAt));
+      for (int index = 0; index < excess; index++) {
+        pool.remove(bag.get(index));
+        trimmed = true;
+      }
     }
-    specials.sort(Comparator.comparingLong(UltsStoredEntry::updatedAt));
-    for (int index = 0; index < excess; index++) {
-      pool.remove(specials.get(index));
-    }
-    return true;
+    return trimmed;
   }
 
   public synchronized UltsWithdrawalPlan withdrawalPlan(
@@ -347,18 +420,41 @@ public final class UltsState extends SavedData {
     return contents;
   }
 
-  /** Writes a pile back as the stored items, keeping the stamp of every kind that was already here. */
+  /**
+   * Writes a pile back as the stored items.
+   *
+   * <p>A special stack is somebody's own thing and keeps its own row, so the rows that were there are
+   * reused rather than rebuilt from the totals: a withdrawal that took one named sword has to leave
+   * the other named swords exactly as they were, timestamps included.
+   */
   private void adoptPool(UltsCraftPool contents) {
-    Map<String, Long> stamps = new HashMap<>();
+    Map<String, List<UltsStoredEntry>> previous = new LinkedHashMap<>();
     for (UltsStoredEntry entry : pool) {
-      stamps.putIfAbsent(stampKey(entry.template()), entry.updatedAt());
+      previous.computeIfAbsent(kindKey(entry.template()), key -> new ArrayList<>()).add(entry);
+    }
+    List<UltsStoredEntry> rebuilt = new ArrayList<>();
+    for (UltsStoredView view : contents.views()) {
+      long amount = view.amount();
+      List<UltsStoredEntry> old = previous.remove(kindKey(view.template()));
+      if (old == null) {
+        rebuilt.add(new UltsStoredEntry(view.template(), amount, now()));
+        continue;
+      }
+      // Oldest first, so what a recipe took came out of the rows that had been there longest.
+      for (UltsStoredEntry entry : old) {
+        if (amount <= 0L) {
+          break;
+        }
+        long kept = Math.min(amount, entry.amount());
+        rebuilt.add(new UltsStoredEntry(entry.template(), kept, entry.updatedAt()));
+        amount -= kept;
+      }
+      if (amount > 0L) {
+        rebuilt.add(new UltsStoredEntry(view.template(), amount, now()));
+      }
     }
     pool.clear();
-    for (UltsStoredView view : contents.views()) {
-      pool.add(new UltsStoredEntry(
-          view.template(), view.amount(),
-          stamps.getOrDefault(stampKey(view.template()), now())));
-    }
+    pool.addAll(rebuilt);
     trimSpecial();
   }
 
@@ -378,17 +474,20 @@ public final class UltsState extends SavedData {
     if (template.isEmpty() || amount < 1) {
       return;
     }
+    // Two stacks of the same kind of thing are one stack here, whether or not the game would let them
+    // stack: the storage keeps a pile per kind, and which kinds those are is what the stacking rule
+    // decides — every component the same, or the same tooltip. Two identically named swords are
+    // therefore one stack of two, and the rows a bag holds are one per different kind.
+    String key = kindKey(template);
     for (int index = 0; index < pool.size(); index++) {
       UltsStoredEntry entry = pool.get(index);
-      if (ItemStack.isSameItemSameComponents(entry.template(), template)) {
+      if (kindKey(entry.template()).equals(key)) {
         long sum;
         try {
           sum = Math.addExact(entry.amount(), amount);
         } catch (ArithmeticException ignored) {
           sum = Long.MAX_VALUE;
         }
-        // Putting more of a kind in counts as that kind arriving again, which is what the special
-        // category sorts and trims by.
         pool.set(index, new UltsStoredEntry(entry.template(), sum, stamp));
         return;
       }
@@ -396,9 +495,14 @@ public final class UltsState extends SavedData {
     pool.add(new UltsStoredEntry(template, amount, stamp));
   }
 
-  /** A key that names a stack by item and components, which is what one pool entry stands for. */
-  private static String stampKey(ItemStack template) {
-    return BuiltInRegistries.ITEM.getKey(template.getItem()) + "|" + template.getComponentsPatch();
+  /**
+   * A key that names the kind of thing a stack is, which is what one pool entry stands for.
+   *
+   * <p>Which kinds there are is what {@link UltsStackKinds} answers, and the same answer decides what a
+   * catalogue row counts as its own stock and whether a category can show a stack at all.
+   */
+  public static String kindKey(ItemStack template) {
+    return UltsStackKinds.of(template);
   }
 
   private static long now() {

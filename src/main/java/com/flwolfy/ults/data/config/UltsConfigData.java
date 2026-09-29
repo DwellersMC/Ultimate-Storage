@@ -12,12 +12,12 @@ public record UltsConfigData(General general, Input input, Special special) {
   public static final int MIN_DRAIN_INTERVAL = 1;
   public static final int MAX_DRAIN_INTERVAL = 20;
 
-  /** How many item rows one page of the storage screen holds, which its listing shows. */
-  public static final int SPECIAL_PAGE_SIZE = 35;
-  /** How many pages of special items a fresh configuration keeps. */
-  public static final int DEFAULT_SPECIAL_PAGES = 10;
-  /** The largest special item count a configuration may name. */
-  public static final int MAX_SPECIAL_ENTRIES = 1_000_000;
+  /** How many stored stacks one page of a bag holds: the grid the bag screen draws them in. */
+  public static final int BUNDLE_PAGE_SIZE = 45;
+  /** How many stored stacks one bag holds out of the box, which is three pages of that grid. */
+  public static final int DEFAULT_BUNDLE_SLOTS = 120;
+  /** The largest number of slots one bundle may be given. */
+  public static final int MAX_BUNDLE_SLOTS = 1_000_000;
 
   public record General(
       String language,
@@ -48,14 +48,15 @@ public record UltsConfigData(General general, Input input, Special special) {
   /**
    * What the storage does with the stacks that carry data of their own.
    *
-   * @param maxEntries how many special entries the storage keeps; past it the oldest are destroyed
-   * @param filterLootEquipment whether equipment a loot table can drop is filtered as well
+   * @param bundleSlots how many stacks one bag holds; past it the oldest are destroyed, and
+   *     {@link #pagesOf(int)} says how many pages of a bag that is
+   * @param stackRule when two stacks of one item are the same kind of thing and pool into one row
    * @param filterMode what the filter does to the items it names
-   * @param filters item ids the filter names itself, on top of what the flag above adds
+   * @param filters item ids the filter names itself
    */
   public record Special(
-      int maxEntries,
-      boolean filterLootEquipment,
+      int bundleSlots,
+      UltsStackRule stackRule,
       UltsSpecialFilter filterMode,
       List<String> filters
   ) {}
@@ -64,15 +65,15 @@ public record UltsConfigData(General general, Input input, Special special) {
       new General("en_us", UltsItemVisibility.AVAILABLE, UltsStorageMode.VOID),
       new Input(2, 0, 2, List.of(), UltsCraftingMode.DISABLED, false),
       new Special(
-          DEFAULT_SPECIAL_PAGES * SPECIAL_PAGE_SIZE,
-          false,
+          DEFAULT_BUNDLE_SLOTS,
+          UltsStackRule.COMPONENTS,
           UltsSpecialFilter.OFF,
           List.of())
   );
 
-  /** How many listing pages a special entry count fills, which is how the screen shows the cap. */
+  /** How many pages of a bag a number of stored stacks fills. */
   public static int pagesOf(int entries) {
-    return entries <= 0 ? 0 : (entries + SPECIAL_PAGE_SIZE - 1) / SPECIAL_PAGE_SIZE;
+    return entries <= 0 ? 0 : (entries + BUNDLE_PAGE_SIZE - 1) / BUNDLE_PAGE_SIZE;
   }
 
   public List<String> validate() {
@@ -106,9 +107,12 @@ public record UltsConfigData(General general, Input input, Special special) {
     if (input == null || input.crafting() == null) {
       invalid.add("input.crafting");
     }
-    if (special == null || special.maxEntries() < 0
-        || special.maxEntries() > MAX_SPECIAL_ENTRIES) {
-      invalid.add("special.maxEntries");
+    if (special == null || special.bundleSlots() < 1
+        || special.bundleSlots() > MAX_BUNDLE_SLOTS) {
+      invalid.add("special.bundleSlots");
+    }
+    if (special == null || special.stackRule() == null) {
+      invalid.add("special.stackRule");
     }
     if (special == null || special.filterMode() == null) {
       invalid.add("special.filterMode");
@@ -137,8 +141,8 @@ public record UltsConfigData(General general, Input input, Special special) {
             input.allowFullInventory()
         ),
         new Special(
-            special.maxEntries(),
-            special.filterLootEquipment(),
+            special.bundleSlots(),
+            special.stackRule(),
             special.filterMode(),
             normalize(special.filters())
         )

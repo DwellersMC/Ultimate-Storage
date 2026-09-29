@@ -37,7 +37,127 @@ processResources {
 	filesMatching("fabric.mod.json") {
 		expand "version": inputs.properties.version
 	}
+	dependsOn "generateItemNames"
 }
+
+// The words the game itself gives its items, for every language this mod speaks.
+//
+// Which languages those are is not listed here but read from the mod's own language files, so shipping
+// `ja_jp.json` in `assets/ultimate-storage/lang` is all it takes to have Japanese item names baked too.
+// The words themselves have to come from the game: a dedicated server's own files carry English only,
+// so a language is taken from the assets Loom has already downloaded, or from the game jar in the Loom
+// cache when the assets do not carry it (which is the case for English). Baked into the jar, they let
+// item search answer a player in the language their own client draws the items in — the only language
+// they can search in.
+def itemNamesDir = layout.buildDirectory.dir("generated/ultsItemNames")
+def modLanguagesDir = file("src/main/resources/assets/${project.archives_base_name}/lang")
+// Only the words an item's name can be built from; the rest of a language file is screens, subtitles
+// and telemetry, which no item is ever named after.
+def itemNamesPrefixes = [
+	"item.", "block.", "effect.", "entity.", "enchantment.", "potion.", "painting.", "filled_map.",
+	"instrument.", "jukebox_song.", "trim_material.", "trim_pattern.", "upgrade.", "smithing_template."
+]
+def modLanguages = providers.provider {
+	modLanguagesDir.isDirectory() ? modLanguagesDir.listFiles()
+		.findAll { it.isFile() && it.name.endsWith(".json") }
+		.collect { it.name.substring(0, it.name.length() - ".json".length()) }
+		.findAll { it ==~ /[a-z0-9][a-z0-9_-]*/ }
+		.sort() : []
+}
+
+/** The asset index of this Minecraft version, or null while Loom has not downloaded the assets. */
+def gameAssetIndex = {
+	File assets = [
+		new File(gradle.gradleUserHomeDir, "caches/fabric-loom/assets"),
+		new File(System.getProperty("user.home"), ".gradle/caches/fabric-loom/assets"),
+		new File(rootDir, ".gradle/loom-cache/assets")
+	].find { new File(it, "indexes").isDirectory() }
+	File index = assets == null ? null : new File(assets, "indexes").listFiles()?.findAll {
+		it.name.startsWith(project.minecraft_version + "-") && it.name.endsWith(".json")
+	}?.sort { it.name }?.last()
+	return [root: assets, objects: index == null ? null : new groovy.json.JsonSlurper().parse(index).objects]
+}
+
+/** The game jars Loom has downloaded, whose own assets carry the languages the index does not. */
+def gameJars = {
+	File loom = new File(gradle.gradleUserHomeDir, "caches/fabric-loom")
+	String version = project.minecraft_version
+	return [
+		new File(loom, "${version}/minecraft-merged.jar"),
+		new File(loom, "${version}/minecraft-client.jar"),
+		new File(loom, "${version}/minecraft-extracted_server.jar"),
+		new File(loom, "minecraftMaven/net/minecraft/minecraft-merged-deobf/${version}/" +
+			"minecraft-merged-deobf-${version}.jar")
+	].findAll { it.isFile() }
+}
+
+def readFromJar = { File jar, String path ->
+	def zip = new java.util.zip.ZipFile(jar)
+	try {
+		def entry = zip.getEntry(path)
+		return entry == null ? null : zip.getInputStream(entry).withCloseable { it.getText("UTF-8") }
+	} finally {
+		zip.close()
+	}
+}
+
+/** The game's own words for one language, or null while the game has none to offer. */
+def gameLanguage = { Map assets, String locale ->
+	String path = "minecraft/lang/${locale}.json"
+	def entry = assets.objects == null ? null : assets.objects[path]
+	if (entry != null && assets.root != null) {
+		File file = new File(assets.root, "objects/${entry.hash.substring(0, 2)}/${entry.hash}")
+		if (file.isFile()) {
+			return new groovy.json.JsonSlurper().parse(file, "UTF-8")
+		}
+	}
+	for (File jar : gameJars()) {
+		String text = readFromJar(jar, "assets/${path}")
+		if (text != null) {
+			return new groovy.json.JsonSlurper().parseText(text)
+		}
+	}
+	return null
+}
+
+tasks.register("generateItemNames") {
+	group = "build"
+	description = "Bakes this version's own item names into the jar, for the languages the mod speaks."
+	inputs.property "locales", modLanguages
+	outputs.dir itemNamesDir
+	doLast {
+		List<String> locales = modLanguages.get()
+		File output = itemNamesDir.get().asFile
+		// Written again from scratch, so a language the mod no longer ships leaves no names behind.
+		delete output
+		if (locales.isEmpty()) {
+			logger.lifecycle("Ults: the mod ships no language file, so no item name is baked.")
+			return
+		}
+		Map assets = gameAssetIndex()
+		for (String locale : locales) {
+			def language = gameLanguage(assets, locale)
+			if (language == null) {
+				logger.lifecycle("Ults: the game has no {} names to bake; its items keep the words " +
+					"their own mods ship for that language.", locale)
+				continue
+			}
+			def names = new TreeMap<String, String>()
+			language.each { key, value ->
+				if (value instanceof String && itemNamesPrefixes.any { key.startsWith(it) }) {
+					names[key] = value
+				}
+			}
+			File target = new File(output, "assets/${project.archives_base_name}/itemnames/${locale}.json")
+			target.parentFile.mkdirs()
+			target.setText(groovy.json.JsonOutput.toJson(names), "UTF-8")
+			logger.lifecycle("Ults: baked {} {} name(s) from the game's own language file.",
+				names.size(), locale)
+		}
+	}
+}
+
+sourceSets.main.resources.srcDir(itemNamesDir)
 
 tasks.withType(JavaCompile).configureEach {
 	it.options.release = 25
@@ -71,4 +191,11 @@ publishing {
 			from components.java
 		}
 	}
+}
+
+// The baked names are data, not source, so the sources jar leaves them out — but it does read the
+// directory they are written to, so it has to wait for the task that writes it.
+tasks.named("sourcesJar") {
+	dependsOn "generateItemNames"
+	exclude "assets/${project.archives_base_name}/itemnames/**"
 }

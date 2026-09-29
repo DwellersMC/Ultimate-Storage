@@ -381,10 +381,13 @@ class UltsCraftResolverTest {
     pool.add(stack(Items.IRON_BLOCK), 1L);
     UltsCraftResolver view = UltsCraftResolver.of(pool, UltsCraftingMode.ALL, false);
 
-    // The ring is walked once and then closes on itself, which is where the walk stops.
+    // The ring is walked once and then closes on itself, which is where the walk stops. The two steps
+    // away from the iron block are real production, as long as they do not need the iron block back.
     assertEquals(1L, view.capacity(stack(Items.GOLD_BLOCK)));
     assertEquals(1L, view.capacity(stack(Items.DIAMOND_BLOCK)));
-    assertEquals(1L, view.capacity(stack(Items.IRON_BLOCK)));
+    // The iron block itself is not craftable: going all the way around the ring hands back the very
+    // block that was in the pile, so nothing was added.
+    assertEquals(0L, view.capacity(stack(Items.IRON_BLOCK)));
     // Nothing can make what it is made of out of nothing, so it is never reached at all.
     assertFalse(view.craftable(stack(Items.EMERALD_BLOCK)));
     assertEquals(0L, view.capacity(stack(Items.EMERALD_BLOCK)));
@@ -434,6 +437,30 @@ class UltsCraftResolverTest {
     assertFalse(view.craftable(stack(Items.CHEST)));
     assertFalse(view.ranOut());
     assertEquals(0L, view.capacity(stack(Items.CHEST)));
+  }
+
+  @Test
+  void aRecipeThatRunsBothWaysAddsNothing() {
+    TestCatalog catalog = new TestCatalog();
+    Ingredient ingot = Ingredient.of(Items.GOLD_INGOT);
+    // The classic round trip: nine ingots into a block, a block back into nine ingots.
+    catalog.recipe(1, stack(Items.GOLD_BLOCK),
+        ingot, ingot, ingot, ingot, ingot, ingot, ingot, ingot, ingot);
+    catalog.recipe(9, stack(Items.GOLD_INGOT), Ingredient.of(Items.GOLD_BLOCK));
+    UltsCraftResolver.source = catalog;
+
+    UltsCraftPool pool = new UltsCraftPool(16);
+    pool.add(stack(Items.GOLD_INGOT), 16L);
+    UltsCraftResolver view = UltsCraftResolver.of(pool, UltsCraftingMode.ALL, false);
+
+    // Sixteen ingots hold one block and no more.
+    assertEquals(1L, view.capacity(stack(Items.GOLD_BLOCK)));
+    // And they are not "craftable ingots": making a block out of nine of them and turning it back
+    // gives back exactly the nine that were already in the pile.
+    assertEquals(0L, view.capacity(stack(Items.GOLD_INGOT)));
+    // A second block would need eighteen ingots, so the plan refuses the same way.
+    assertNull(view.plan(stack(Items.GOLD_INGOT), 1L));
+    assertEquals(16L, pool.amount(stack(Items.GOLD_INGOT)));
   }
 
   /** Items of the vanilla registry that a test may use as its own, never air or a reserved one. */
