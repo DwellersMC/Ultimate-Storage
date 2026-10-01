@@ -26,10 +26,11 @@ import net.minecraft.world.item.Items;
  * still arrives after the storage changed under it is answered too: it takes what is really there, and
  * the row redraws with the new number.
  *
- * <p>The lines cannot follow the shift key while the screen is open, and this is worth knowing: opening
- * a screen makes the client release every key ({@code Gui.setScreen} calls {@code KeyMapping.releaseAll})
- * and it stops tracking keys at all until the screen closes, so the input it reports to the server says
- * "no shift" however the player holds the key. Every line a row answers is therefore listed at once.
+ * <p>The lines cannot follow the shift key while the screen is open, and this is worth knowing: a line is
+ * built on the server when the row is drawn, so it has no way of knowing whether the key is held by the
+ * time it is read. Every line a row answers is therefore listed at once. The clicks themselves are not
+ * affected: the client sends a shift click as {@code QUICK_MOVE} with the mouse button beside it, which is
+ * the pair of things a row's branches are written against.
  */
 final class UltsTakeHints {
 
@@ -132,14 +133,17 @@ final class UltsTakeHints {
   /**
    * The keys of the lines a bag row shows, in the order they are drawn.
    *
-   * <p>One line, because a bag row answers one click: the right click that opens the bag. What is inside
-   * is taken from inside, on rows of its own, and emptying the whole bag belongs to the bag's own screen.
+   * <p>A bag row answers two clicks: the right click that opens the bag, and — while the configuration
+   * allows it — the shift right click that asks to empty the whole bag out, which is the same question the
+   * bag screen's own status book asks. What is inside is taken from inside, on rows of its own, so no line
+   * about a left click stands here.
    *
    * @param right the key of what a right click offers
+   * @param takeAll whether the configuration allows taking everything at all
    * @return the keys, in the order they are drawn
    */
-  static List<String> bagLines(String right) {
-    return List.of(right);
+  static List<String> bagLines(String right, boolean takeAll) {
+    return takeAll ? List.of(right, SHIFT_ALL) : List.of(right);
   }
 
   /**
@@ -171,14 +175,16 @@ final class UltsTakeHints {
   }
 
   /**
-   * Fills the click lines of a bag row, which opens the bag and answers nothing else.
+   * Fills the click lines of a bag row: the right click that opens it, and the shift right click that asks
+   * to empty it out while the configuration allows that.
    *
    * @param builder the bag row being built
    * @param right the key of what a right click offers
+   * @param takeAll whether the configuration allows taking everything at all
    * @return the same row, for chaining
    */
-  static GuiElementBuilder bagHints(GuiElementBuilder builder, String right) {
-    for (String key : bagLines(right)) {
+  static GuiElementBuilder bagHints(GuiElementBuilder builder, String right, boolean takeAll) {
+    for (String key : bagLines(right, takeAll)) {
       builder.addLoreLine(line(key));
     }
     return builder;

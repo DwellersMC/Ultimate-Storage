@@ -61,10 +61,13 @@ class UltsTakeHintsTest {
 
   @Test
   void aRowThatOnlyOpensABagListsTheRightClickAndNothingElse() {
-    // A bag is opened from here rather than emptied from here, so the row lists one line and answers one
-    // click: nothing is said about a left click or a shift click, because none of them does anything.
-    assertEquals(List.of("ults.gui.take.bag"), UltsTakeHints.bagLines("ults.gui.take.bag"));
-    assertFalse(UltsTakeHints.bagLines("ults.gui.take.bag").contains(UltsTakeHints.TAKE));
+    // A bag is opened from here rather than emptied from here, so the row lists what it answers: the right
+    // click that opens it, and — while the configuration allows taking everything — the shift right click
+    // that asks to empty the whole bag, which is the question the bag's own status book asks too.
+    assertEquals(List.of("ults.gui.take.bag"), UltsTakeHints.bagLines("ults.gui.take.bag", false));
+    assertEquals(List.of("ults.gui.take.bag", UltsTakeHints.SHIFT_ALL),
+        UltsTakeHints.bagLines("ults.gui.take.bag", true));
+    assertFalse(UltsTakeHints.bagLines("ults.gui.take.bag", true).contains(UltsTakeHints.TAKE));
   }
 
   @Test

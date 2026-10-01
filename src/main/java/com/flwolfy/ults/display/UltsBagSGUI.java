@@ -283,9 +283,9 @@ public final class UltsBagSGUI extends SimpleGui {
     int quantity = (int) Math.min(obtainable, view.template().getMaxStackSize());
     if (!runtime.allowFullInventory() && !UltsWithdrawSGUI.canFit(
         player, UltsWithdrawalOutput.stacks(view.template(), quantity))) {
-      player.sendSystemMessage(
-          UltsGuiText.text("ults.withdraw.problem.inventory").copy().withStyle(ChatFormatting.RED),
-          true);
+      // In the chat, like the box refusals: a backpack with no room is a refusal the player has to be able
+      // to read back, not a line that fades above the hotbar.
+      UltsGuiChat.failure(player, "ults.withdraw.problem.inventory");
       return;
     }
     List<ItemStack> outputs = runtime.takePlanned(view.template(), quantity, false);
@@ -307,14 +307,13 @@ public final class UltsBagSGUI extends SimpleGui {
   private void takeBox(UltsStoredView view) {
     UltsWithdrawalPlan plan = runtime.withdrawalPlan(view.template(), 1, true);
     if (!plan.available()) {
-      player.sendSystemMessage(
-          UltsGuiText.text("ults.gui.take.box.failed").copy().withStyle(ChatFormatting.RED), true);
+      // In the chat, not above the hotbar: how short of a box the storage is, or that no box could be
+      // filled, is something the player has to be able to read back.
+      UltsGuiChat.failure(player, "ults.gui.take.box.failed");
       return;
     }
     if (!runtime.allowFullInventory() && !UltsWithdrawSGUI.canFit(player, plan.outputs())) {
-      player.sendSystemMessage(
-          UltsGuiText.text("ults.withdraw.problem.inventory").copy().withStyle(ChatFormatting.RED),
-          true);
+      UltsGuiChat.failure(player, "ults.withdraw.problem.inventory");
       return;
     }
     List<ItemStack> outputs = runtime.takePlanned(view.template(), 1, true);

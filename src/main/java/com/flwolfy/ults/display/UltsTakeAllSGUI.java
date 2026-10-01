@@ -3,7 +3,6 @@ package com.flwolfy.ults.display;
 import com.flwolfy.ults.UltsRuntime;
 import com.flwolfy.ults.data.config.UltsCraftingMode;
 import com.flwolfy.ults.data.state.UltsStoredView;
-import com.flwolfy.ults.util.UltsTextBuilder;
 import eu.pb4.sgui.api.elements.GuiElementBuilder;
 import eu.pb4.sgui.api.gui.SimpleGui;
 import java.util.ArrayList;
@@ -288,10 +287,9 @@ public final class UltsTakeAllSGUI extends SimpleGui {
     UltsTakeAllPlan plan = plan(withCrafting);
     if (!plan.possible()) {
       UltsGuiSound.click(player);
-      player.sendSystemMessage(
-          UltsTextBuilder.failure(UltsGuiText.text(
-              plan.blocked() ? "ults.all.confirm.full" : "ults.all.confirm.none")),
-          true);
+      // Said in the chat, like every other refusal a screen makes: it stays where the player can read it
+      // back, instead of fading above the hotbar while they are still looking at the screen.
+      UltsGuiChat.failure(player, plan.blocked() ? "ults.all.confirm.full" : "ults.all.confirm.none");
       render();
       return;
     }

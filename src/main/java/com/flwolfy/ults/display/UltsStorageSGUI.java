@@ -587,6 +587,12 @@ public final class UltsStorageSGUI extends SimpleGui {
         if (type == ClickType.MOUSE_RIGHT) {
           UltsGuiSound.click(player);
           UltsBagSGUI.open(player, runtime, template.getItem());
+        } else if (type == ClickType.MOUSE_RIGHT_SHIFT && runtime.allowTakeAll()) {
+          // Emptying the whole bag is the question the bag screen's own status book asks, so it is answered
+          // by the same screen: a player who asks it from the row does not have to open the bag first.
+          UltsGuiSound.click(player);
+          UltsTakeAllSGUI.openForBag(
+              player, runtime, template.getItem(), () -> UltsStorageSGUI.open(player, runtime));
         }
       });
       return bag;
@@ -660,9 +666,9 @@ public final class UltsStorageSGUI extends SimpleGui {
     int quantity = (int) Math.min(obtainable, template.getMaxStackSize());
     List<ItemStack> wanted = UltsWithdrawalOutput.stacks(template, quantity);
     if (!runtime.allowFullInventory() && !UltsWithdrawSGUI.canFit(player, wanted)) {
-      player.sendSystemMessage(
-          UltsGuiText.text("ults.withdraw.problem.inventory").copy().withStyle(ChatFormatting.RED),
-          true);
+      // In the chat, like the box refusals: a backpack with no room is a refusal the player has to be able
+      // to read back, not a line that fades above the hotbar.
+      UltsGuiChat.failure(player, "ults.withdraw.problem.inventory");
       return;
     }
     List<ItemStack> outputs = runtime.takePlanned(template, quantity, false);
@@ -685,14 +691,14 @@ public final class UltsStorageSGUI extends SimpleGui {
   private void takeBox(ItemStack template) {
     UltsWithdrawalPlan plan = runtime.withdrawalPlan(template, 1, true);
     if (!plan.available()) {
-      player.sendSystemMessage(
-          UltsGuiText.text("ults.gui.take.box.failed").copy().withStyle(ChatFormatting.RED), true);
+      // Said in the chat and not above the hotbar: a box cannot be packed for reasons the player has to be
+      // able to read back — how much is short, or that no box is there to fill — and the line above the
+      // hotbar is gone before it can be.
+      UltsGuiChat.failure(player, "ults.gui.take.box.failed");
       return;
     }
     if (!runtime.allowFullInventory() && !UltsWithdrawSGUI.canFit(player, plan.outputs())) {
-      player.sendSystemMessage(
-          UltsGuiText.text("ults.withdraw.problem.inventory").copy().withStyle(ChatFormatting.RED),
-          true);
+      UltsGuiChat.failure(player, "ults.withdraw.problem.inventory");
       return;
     }
     List<ItemStack> outputs = runtime.takePlanned(template, 1, true);
@@ -921,7 +927,15 @@ public final class UltsStorageSGUI extends SimpleGui {
         .setName(bagTitle(newest))
         .setLore(lines)
         .hideDefaultTooltip();
-    return UltsTakeHints.bagHints(bag, "ults.gui.take.bag");
+    return UltsTakeHints.bagHints(bag, "ults.gui.take.bag", takeAllAllowed());
+  }
+
+  /**
+   * Whether the configuration lets a player take a whole stock out, which is a line a bag row shows for
+   * itself as well as one a row answers.
+   */
+  private static boolean takeAllAllowed() {
+    return UltsConfigManager.getInstance().data().input().allowTakeAll();
   }
 
   /**
