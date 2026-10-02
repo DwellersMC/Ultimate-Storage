@@ -27,6 +27,20 @@ public final class UltsStackKinds {
   /** What one stack's tooltip says, remembered per item and set of components: it is asked a lot. */
   private static final Map<TooltipKey, String> TOOLTIPS = new ConcurrentHashMap<>();
 
+  /**
+   * How many tooltips are remembered before the cache is dropped.
+   *
+   * <p>A key is one item with one set of components, so every differently worn, enchanted or named stack
+   * a server ever compares is its own entry. Without a bound that is a cache which only ever grows; with
+   * one, the worst a full cache costs is writing the tooltips out again.
+   */
+  private static final int MAX_TOOLTIPS = 20_000;
+
+  /** Drops what is remembered, which a configuration reload does because the rule may have changed. */
+  public static void clear() {
+    TOOLTIPS.clear();
+  }
+
   /** What a tooltip answer belongs to: the same components on another item read differently. */
   private record TooltipKey(net.minecraft.world.item.Item item, DataComponentPatch patch) {}
 
@@ -77,6 +91,9 @@ public final class UltsStackKinds {
    * every row of a listing cheap.
    */
   private static String tooltipOf(ItemStack stack) {
+    if (TOOLTIPS.size() >= MAX_TOOLTIPS) {
+      TOOLTIPS.clear();
+    }
     return TOOLTIPS.computeIfAbsent(
         new TooltipKey(stack.getItem(), stack.getComponentsPatch()), ignored -> {
           StringBuilder text = new StringBuilder();

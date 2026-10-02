@@ -50,7 +50,9 @@ processResources {
 // item search answer a player in the language their own client draws the items in — the only language
 // they can search in.
 def itemNamesDir = layout.buildDirectory.dir("generated/ultsItemNames")
-def modLanguagesDir = file("src/main/resources/assets/${project.archives_base_name}/lang")
+def itemNamesNamespace = project.archives_base_name.toString()
+def itemNamesGameVersion = project.minecraft_version.toString()
+def modLanguagesDir = file("src/main/resources/assets/${itemNamesNamespace}/lang")
 // Only the words an item's name can be built from; the rest of a language file is screens, subtitles
 // and telemetry, which no item is ever named after.
 def itemNamesPrefixes = [
@@ -71,17 +73,22 @@ def gameAssetIndex = {
 		new File(gradle.gradleUserHomeDir, "caches/fabric-loom/assets"),
 		new File(System.getProperty("user.home"), ".gradle/caches/fabric-loom/assets"),
 		new File(rootDir, ".gradle/loom-cache/assets")
-	].find { new File(it, "indexes").isDirectory() }
-	File index = assets == null ? null : new File(assets, "indexes").listFiles()?.findAll {
-		it.name.startsWith(project.minecraft_version + "-") && it.name.endsWith(".json")
-	}?.sort { it.name }?.last()
+	].find { root ->
+		new File(root, "indexes").listFiles()?.any {
+			it.name.startsWith(itemNamesGameVersion + "-") && it.name.endsWith(".json")
+		}
+	}
+	List<File> indexes = assets == null ? [] : new File(assets, "indexes").listFiles()?.findAll {
+		it.name.startsWith(itemNamesGameVersion + "-") && it.name.endsWith(".json")
+	}?.sort { it.name } ?: []
+	File index = indexes.isEmpty() ? null : indexes.last()
 	return [root: assets, objects: index == null ? null : new groovy.json.JsonSlurper().parse(index).objects]
 }
 
 /** The game jars Loom has downloaded, whose own assets carry the languages the index does not. */
 def gameJars = {
 	File loom = new File(gradle.gradleUserHomeDir, "caches/fabric-loom")
-	String version = project.minecraft_version
+	String version = itemNamesGameVersion
 	return [
 		new File(loom, "${version}/minecraft-merged.jar"),
 		new File(loom, "${version}/minecraft-client.jar"),
@@ -124,6 +131,15 @@ tasks.register("generateItemNames") {
 	group = "build"
 	description = "Bakes this version's own item names into the jar, for the languages the mod speaks."
 	inputs.property "locales", modLanguages
+	inputs.property "minecraftVersion", itemNamesGameVersion
+	inputs.property "assetLanguages", providers.provider {
+		Map assets = gameAssetIndex()
+		modLanguages.get().collect { locale ->
+			def entry = assets.objects == null ? null : assets.objects["minecraft/lang/${locale}.json"]
+			entry != null && new File(assets.root,
+				"objects/${entry.hash.substring(0, 2)}/${entry.hash}").isFile() ? entry.hash : "unavailable"
+		}
+	}
 	outputs.dir itemNamesDir
 	doLast {
 		List<String> locales = modLanguages.get()
@@ -148,7 +164,7 @@ tasks.register("generateItemNames") {
 					names[key] = value
 				}
 			}
-			File target = new File(output, "assets/${project.archives_base_name}/itemnames/${locale}.json")
+			File target = new File(output, "assets/${itemNamesNamespace}/itemnames/${locale}.json")
 			target.parentFile.mkdirs()
 			target.setText(groovy.json.JsonOutput.toJson(names), "UTF-8")
 			logger.lifecycle("Ults: baked {} {} name(s) from the game's own language file.",
@@ -169,6 +185,70 @@ tasks.withType(Test).configureEach {
 	useJUnitPlatform()
 	workingDir = layout.buildDirectory.dir('test-work').get().asFile
 	doFirst { workingDir.mkdirs() }
+}
+
+tasks.register('acceptanceTest', Test) {
+	group = 'verification'
+	description = 'Runs headless storage, recovery, crafting and delivery acceptance scenarios.'
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	useJUnitPlatform { includeTags 'acceptance' }
+	shouldRunAfter tasks.named('test')
+}
+
+tasks.named('check') { dependsOn tasks.named('acceptanceTest') }
+
+// Opt-in native server acceptance. Ordinary runs and the distributable jar never load the probe.
+// Usage: gradlew -PserverAcceptance serverAcceptanceTest
+if (providers.gradleProperty('serverAcceptance').isPresent()) {
+	def acceptanceRoot = layout.buildDirectory.dir('server-acceptance').get().asFile
+	def acceptedEula = file('run/eula.txt')
+	def serverProbe = sourceSets.create('serverTest') {
+		java.setSrcDirs(['src/serverTest/java'])
+		resources.setSrcDirs(['src/serverTest/resources'])
+		compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath
+		runtimeClasspath += sourceSets.main.output + sourceSets.main.runtimeClasspath
+	}
+	loom.mods.register('ults-server-acceptance') { sourceSet serverProbe }
+	loom.runs.named('server') {
+		source serverProbe
+		runDir 'build/server-acceptance'
+		vmArg '-Xmx768m'
+		programArg 'nogui'
+	}
+	tasks.named('runServer') {
+		dependsOn tasks.named('serverTestClasses')
+		doFirst {
+			if (internalRunDir.get().asFile.canonicalFile != acceptanceRoot.canonicalFile) {
+				throw new GradleException('Server acceptance must run in its isolated build directory')
+			}
+			acceptanceRoot.mkdirs()
+			def eula = new File(acceptanceRoot, 'eula.txt')
+			if (!eula.isFile() || !(eula.text =~ /(?m)^eula=true\s*$/).find()) {
+				if (!acceptedEula.isFile() || !(acceptedEula.text =~ /(?m)^eula=true\s*$/).find()) {
+					throw new GradleException('Native acceptance requires an already accepted run/eula.txt')
+				}
+				eula.setText(acceptedEula.getText('UTF-8'), 'UTF-8')
+			}
+			new File(acceptanceRoot, 'server.properties').setText(
+				"level-name=world-${UUID.randomUUID()}\nserver-ip=127.0.0.1\nserver-port=0\n" +
+				"online-mode=true\npause-when-empty-seconds=0\nview-distance=2\n" +
+				"simulation-distance=2\nmax-players=1\nspawn-protection=0\n", 'UTF-8')
+			new File(acceptanceRoot, 'server-acceptance-results.txt').setText('RUNNING\n', 'UTF-8')
+		}
+		doLast {
+			def report = new File(acceptanceRoot, 'server-acceptance-results.txt')
+			if (!report.isFile() || !report.getText('UTF-8').startsWith('PASS\n')) {
+				throw new GradleException('Native server acceptance failed: ' + report)
+			}
+			logger.lifecycle(report.getText('UTF-8'))
+		}
+	}
+	tasks.register('serverAcceptanceTest') {
+		group = 'verification'
+		description = 'Tests vanilla recipes, world topology, redstone and actual saved-data writes in an isolated server.'
+		dependsOn tasks.named('runServer')
+	}
 }
 
 java {

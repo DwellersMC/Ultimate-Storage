@@ -456,7 +456,11 @@ public final class UltsCommand {
 
   /** Binding, deleting, the highlight and reloading all need the one configured permission level. */
   private static boolean can(CommandSourceStack source) {
-    return source.getEntity() == null || UltsRuntime.canManage(source.permissions());
+    // Asking the source rather than assuming: the server console and RCON hold every permission and pass
+    // this on their own, while a command block holds the level it was placed with and is held to the
+    // configured one exactly like a player. Treating every source without an entity as trusted would let
+    // a level-2 command block past a server that asked for level 3.
+    return UltsRuntime.canManage(source.permissions());
   }
 
   private static UltsRuntime runtime(CommandContext<CommandSourceStack> context) {

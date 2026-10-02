@@ -216,7 +216,8 @@ public final class UltsInputManager {
           continue;
         }
       }
-      boolean drained = drain(container);
+      boolean drained = drain(UltsContainers.inventories(level, binding.pos()).stream()
+          .map(UltsContainers.InventoryPart::inventory).toList());
       quiet.hopper = drainInboundHoppers(level, binding.pos(), quiet);
       quiet.idle = drained ? 0 : quiet.idle + 1;
     }
@@ -245,11 +246,24 @@ public final class UltsInputManager {
         }
         levels.put(binding.dimension(), level);
       }
+      if (UltsRemoteStorage.containerAt(level, binding.pos()) == null) {
+        continue;
+      }
+      // The cached list is in downstream-first order. Revalidate its edges, not just its nodes:
+      // a locked, rotated, removed or unloaded downstream hopper cuts off its whole upstream branch.
+      Set<BlockPos> connected = new HashSet<>(UltsContainers.parts(level, binding.pos()));
       for (BlockPos position : quiet.path) {
         if (!level.hasChunk(position.getX() >> 4, position.getZ() >> 4)
             || !(level.getBlockEntity(position) instanceof HopperBlockEntity hopper)) {
           continue;
         }
+        var current = level.getBlockState(position);
+        if (!(current.getBlock() instanceof HopperBlock)
+            || !current.getValue(HopperBlock.ENABLED)
+            || !connected.contains(position.relative(current.getValue(HopperBlock.FACING)))) {
+          continue;
+        }
+        connected.add(position);
         drain(hopper);
         ((UltsHopperAccessor) hopper).ults$setCooldown(0);
       }
@@ -291,7 +305,7 @@ public final class UltsInputManager {
       for (BlockPos target : frontier) {
         for (Direction direction : Direction.values()) {
           BlockPos candidate = target.relative(direction);
-          if (!visited.add(candidate) || !level.hasChunk(candidate.getX() >> 4, candidate.getZ() >> 4)) {
+          if (visited.contains(candidate) || !level.hasChunk(candidate.getX() >> 4, candidate.getZ() >> 4)) {
             continue;
           }
           var blockState = level.getBlockState(candidate);
@@ -301,8 +315,13 @@ public final class UltsInputManager {
               || !(level.getBlockEntity(candidate) instanceof HopperBlockEntity hopper)) {
             continue;
           }
+          visited.add(candidate);
           fed = true;
-          drain(hopper);
+          // A hopper with nothing in it is left alone: it is still part of the path, and the next tick
+          // asks again, but there is nothing to carry and nothing to look at.
+          if (!hopper.isEmpty()) {
+            drain(hopper);
+          }
           ((UltsHopperAccessor) hopper).ults$setCooldown(0);
           founded.add(candidate);
           next.add(candidate);
@@ -316,20 +335,30 @@ public final class UltsInputManager {
 
   /** Empties a container into the storage, reporting whether there was anything in it. */
   private boolean drain(Container container) {
-    boolean changed = false;
-    for (int slot = 0; slot < container.getContainerSize(); slot++) {
-      ItemStack stack = container.getItem(slot);
-      if (stack.isEmpty()) {
-        continue;
+    return drain(List.of(container));
+  }
+
+  /** One logical input owns all of its physical inventories; apply the bag cap once to the batch. */
+  private boolean drain(List<Container> containers) {
+    List<ItemStack> stacks = new ArrayList<>();
+    for (Container container : containers) {
+      boolean changed = false;
+      for (int slot = 0; slot < container.getContainerSize(); slot++) {
+        ItemStack stack = container.getItem(slot);
+        if (stack.isEmpty()) continue;
+        stacks.add(stack.copy());
+        container.setItem(slot, ItemStack.EMPTY);
+        changed = true;
       }
-      state.deposit(stack.copy());
-      container.setItem(slot, ItemStack.EMPTY);
-      changed = true;
+      if (changed) container.setChanged();
     }
-    if (changed) {
-      container.setChanged();
+    if (stacks.isEmpty()) {
+      return false;
     }
-    return changed;
+    // The whole container in one go: the storage's special cap is a property of the pool, so it is asked
+    // about once per container rather than once per slot.
+    state.depositAll(stacks);
+    return true;
   }
 
   private ServerLevel level(String dimension) {

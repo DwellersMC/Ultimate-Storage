@@ -27,6 +27,19 @@ import org.junit.jupiter.api.Test;
 class UltsStorageSGuiTest {
 
   @Test
+  @org.junit.jupiter.api.Tag("acceptance")
+  void specialRowsAndTakeAllBagTotalsNeverOverflowIntoNegativeAmounts() {
+    UltsTestBootstrap.boot();
+    var sword = named(Items.DIAMOND_SWORD, "first");
+    var rows = List.of(new UltsStoredView(sword, Long.MAX_VALUE, true, 1L),
+        new UltsStoredView(named(Items.DIAMOND_SWORD, "second"), 64L, true, 2L));
+    var combined = UltsStorageSGUI.specialRows(rows).getFirst();
+    assertEquals(Long.MAX_VALUE, combined.amount());
+    assertEquals(2L, combined.updatedAt());
+    assertEquals(Long.MAX_VALUE, UltsTakeAllSGUI.bagStock(Items.DIAMOND_SWORD, rows).total());
+  }
+
+  @Test
   void theSpecialCategoryIsOneRowPerItemNewestFirst() {
     UltsTestBootstrap.boot();
     ItemStack sword = named(Items.DIAMOND_SWORD, "一号剑");

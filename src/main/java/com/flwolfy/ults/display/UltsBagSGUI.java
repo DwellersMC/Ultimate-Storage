@@ -1,5 +1,6 @@
 package com.flwolfy.ults.display;
 
+import com.flwolfy.ults.crafting.UltsCraftMath;
 import com.flwolfy.ults.UltsRuntime;
 import com.flwolfy.ults.data.config.UltsConfigData;
 import com.flwolfy.ults.data.lang.UltsItemNames;
@@ -118,9 +119,8 @@ public final class UltsBagSGUI extends SimpleGui {
     int last = Math.min(first + CONTENT_SLOTS, rows.size());
     // One question for the whole screen: whether there is a box to fill at all is a fact about the
     // storage, not about a row, so the rows do not each ask it again.
-    boolean boxInStock = !runtime.availableBox().isEmpty();
     for (int index = first; index < last; index++) {
-      setSlot(index - first, rowButton(rows.get(index), boxInStock));
+      setSlot(index - first, rowButton(rows.get(index)));
     }
     if (rows.isEmpty()) {
       setSlot(CONTENT_SLOTS / 2, element(Items.PAPER)
@@ -231,18 +231,18 @@ public final class UltsBagSGUI extends SimpleGui {
   }
 
   /** One stored stack, behaving exactly like a row of the storage screen does. */
-  private GuiElementBuilder rowButton(UltsStoredView view, boolean boxInStock) {
+  private GuiElementBuilder rowButton(UltsStoredView view) {
     // One piece is what the icon shows, whatever the stack holds: how much is there is said in the lore,
     // so a bag reads as rows of one thing each rather than as a row of numbers.
     List<UltsStoredView> stock = runtime.storedItems();
-    long obtainable = view.amount() + runtime.craftable(view.template(), stock);
+    long obtainable = UltsCraftMath.add(view.amount(), runtime.craftable(view.template(), stock));
     GuiElementBuilder builder = new GuiElementBuilder(view.template().copyWithCount(1))
         .addLoreLine(Component.empty())
         .addLoreLine(UltsGuiText.labelled("ults.gui.amount", view.amount(), view.amount() < 1))
         .addLoreLine(UltsGuiText.labelled(
             "ults.gui.special.updated", UltsGuiText.stamp(view.updatedAt()), !view.stampKnown()));
     UltsTakeHints.hints(builder, view.template(), obtainable, "ults.gui.take.choose",
-        UltsTakeHints.boxPossible(runtime, view.template(), stock, obtainable, boxInStock),
+        UltsTakeHints.boxPossible(runtime, view.template(), stock, obtainable),
         runtime.allowTakeAll());
     return builder.setCallback((slot, type, action, gui) -> {
       if (type == ClickType.MOUSE_LEFT) {
@@ -272,15 +272,12 @@ public final class UltsBagSGUI extends SimpleGui {
    * with, so a click never asks for what is no longer there.
    */
   private void takeOneStack(UltsStoredView view) {
-    List<UltsStoredView> live = runtime.storedItems();
-    long obtainable = UltsRuntime.storedAmount(view.template(), live)
-        + runtime.craftableFresh(view.template(), live);
-    if (obtainable < 1L) {
+    int quantity = runtime.stackQuantity(view.template());
+    if (quantity < 1) {
       UltsGuiSound.click(player);
       render();
       return;
     }
-    int quantity = (int) Math.min(obtainable, view.template().getMaxStackSize());
     if (!runtime.allowFullInventory() && !UltsWithdrawSGUI.canFit(
         player, UltsWithdrawalOutput.stacks(view.template(), quantity))) {
       // In the chat, like the box refusals: a backpack with no room is a refusal the player has to be able
@@ -290,11 +287,14 @@ public final class UltsBagSGUI extends SimpleGui {
     }
     List<ItemStack> outputs = runtime.takePlanned(view.template(), quantity, false);
     if (outputs.isEmpty()) {
+      // The row was drawn a moment ago and the storage is asked as it stands: nothing left means somebody
+      // else took it, so the click says so instead of looking like a click that did not register.
+      UltsGuiChat.failure(player, "ults.withdraw.problem.gone");
       render();
       return;
     }
     UltsGuiSound.confirm(player);
-    UltsGuiGive.hand(player, runtime, outputs, runtime.allowFullInventory());
+    UltsGuiGive.handWithFeedback(player, runtime, outputs, runtime.allowFullInventory());
     render();
   }
 
@@ -318,11 +318,14 @@ public final class UltsBagSGUI extends SimpleGui {
     }
     List<ItemStack> outputs = runtime.takePlanned(view.template(), 1, true);
     if (outputs.isEmpty()) {
+      // The row was drawn a moment ago and the storage is asked as it stands: nothing left means somebody
+      // else took it, so the click says so instead of looking like a click that did not register.
+      UltsGuiChat.failure(player, "ults.withdraw.problem.gone");
       render();
       return;
     }
     UltsGuiSound.confirm(player);
-    UltsGuiGive.hand(player, runtime, outputs, runtime.allowFullInventory());
+    UltsGuiGive.handWithFeedback(player, runtime, outputs, runtime.allowFullInventory());
     render();
   }
 

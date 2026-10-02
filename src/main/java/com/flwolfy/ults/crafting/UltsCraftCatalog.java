@@ -75,7 +75,11 @@ public final class UltsCraftCatalog {
             continue;
           }
           UltsCraftRecipe entry = new UltsCraftRecipe(
-              stonecutter, id, ingredients, produced, produced.getCount());
+              stonecutter, id, ingredients, produced,
+              // A display is not the recipe and is not obliged to tell the truth about it: a count larger
+              // than one stack could never leave a single run, and a plan built on it would promise more
+              // than the run makes. The count is held to what one stack can hold.
+              Math.max(1, Math.min(produced.getCount(), produced.getMaxStackSize())));
           index.computeIfAbsent(produced.getItem(), key -> new ArrayList<>()).add(entry);
           found++;
         }

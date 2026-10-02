@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.flwolfy.ults.UltsRuntime;
 import com.flwolfy.ults.crafting.UltsTestBootstrap;
 import com.flwolfy.ults.data.config.UltsConfigData;
 import com.flwolfy.ults.data.config.UltsItemVisibility;
@@ -95,6 +96,20 @@ class UltsStateTest {
     UltsBinding binding = new UltsBinding("", "minecraft:overworld", 5, 6, 7, "");
     Tag encoded = UltsBinding.CODEC.encodeStart(NbtOps.INSTANCE, binding).getOrThrow();
     assertEquals(binding, UltsBinding.CODEC.parse(NbtOps.INSTANCE, encoded).getOrThrow());
+  }
+
+  @Test
+  void theStateReadsBackEverythingItWrote() {
+    UltsState state = new UltsState();
+    state.addBinding(binding("仓库", 1, 2, 3));
+    state.deposit(new ItemStack(Items.STONE, 5));
+    Tag encoded = UltsState.TYPE.codec().encodeStart(NbtOps.INSTANCE, state).getOrThrow();
+    // The lists are read one entry at a time — an entry the game cannot make sense of is left out rather
+    // than costing the whole file — so what is written has to come back whole as well.
+    UltsState read = UltsState.TYPE.codec().parse(NbtOps.INSTANCE, encoded).getOrThrow();
+    assertEquals(1, read.bindings().size());
+    assertEquals("仓库", read.bindings().getFirst().note());
+    assertEquals(5L, UltsRuntime.storedAmount(new ItemStack(Items.STONE), read.items()));
   }
 
   @Test

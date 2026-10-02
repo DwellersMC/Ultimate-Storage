@@ -1,6 +1,7 @@
 package com.flwolfy.ults;
 
 import com.flwolfy.ults.crafting.UltsCraftCatalog;
+import com.flwolfy.ults.crafting.UltsCraftMath;
 import com.flwolfy.ults.crafting.UltsCraftPool;
 import com.flwolfy.ults.crafting.UltsCraftResolver;
 import com.flwolfy.ults.data.config.UltsConfigManager;
@@ -10,7 +11,9 @@ import com.flwolfy.ults.data.lang.UltsItemNames;
 import com.flwolfy.ults.data.lang.UltsLangManager;
 import com.flwolfy.ults.data.state.UltsBinding;
 import com.flwolfy.ults.data.state.UltsRemoteStorage;
+import com.flwolfy.ults.data.state.UltsStackKinds;
 import com.flwolfy.ults.data.state.UltsState;
+import com.flwolfy.ults.data.state.UltsWithdrawalPlanner;
 import com.flwolfy.ults.data.state.UltsStoredView;
 import com.flwolfy.ults.data.state.UltsSpecialFilters;
 import com.flwolfy.ults.data.state.UltsWithdrawalOutput;
@@ -20,6 +23,7 @@ import com.flwolfy.ults.display.UltsCreativeCatalog;
 import com.flwolfy.ults.display.UltsStorageSGUI;
 import com.flwolfy.ults.display.UltsSurvivalItems;
 import com.flwolfy.ults.display.UltsTakeAllStreams;
+import com.flwolfy.ults.display.UltsTakeAllSGUI;
 import com.flwolfy.ults.display.UltsWithdrawSGUI;
 import com.flwolfy.ults.input.UltsContainers;
 import com.flwolfy.ults.input.UltsInputManager;
@@ -30,7 +34,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.LongSupplier;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.component.DataComponentPatch;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket;
 import net.minecraft.server.MinecraftServer;
@@ -90,14 +96,22 @@ public final class UltsRuntime {
 
   private final MinecraftServer server;
   private final UltsState state;
+  private final LongSupplier ticks;
   private final UltsInputManager inputs;
   private final UltsHighlights highlights = new UltsHighlights();
   /** Stocks on their way out of the storage, a tick's worth at a time. */
   private final UltsTakeAllStreams streams = new UltsTakeAllStreams();
   /** Per player tick of the last break-protection notice, so it cannot flood the chat. */
   private final Map<UUID, Long> protectedNotices = new HashMap<>();
-  private final UltsRemoteStorage.Snapshot[] remoteShards =
-      new UltsRemoteStorage.Snapshot[REMOTE_SHARDS];
+  private record BrokenPart(String dimension, BlockPos position) {}
+  private final Map<BrokenPart, UltsBinding> breakingBindings = new HashMap<>();
+  private record PackingKind(Item item, DataComponentPatch components) {}
+  private final Map<PackingKind, Boolean> packingAnswers = new HashMap<>();
+  private long packingFingerprint;
+  private UltsCraftingMode packingMode;
+  private final UltsRemoteStorage.ShardSnapshot[] remoteShards =
+      new UltsRemoteStorage.ShardSnapshot[REMOTE_SHARDS];
+  private long shardGeneration;
   private UltsRemoteStorage.Snapshot merged;
   private boolean shardsStale = true;
   private int shardCursor;
@@ -125,10 +139,19 @@ public final class UltsRuntime {
   private int craftableWaits;
 
   UltsRuntime(MinecraftServer server) {
-    this.server = server;
-    rebuildCatalogs(server);
+    this(server, loadState(server), server::getTickCount);
     UltsMod.LOGGER.info("UltStorage automatic crafting is {}", craftingMode());
-    state = server.overworld().getDataStorage().computeIfAbsent(UltsState.TYPE);
+  }
+
+  private static UltsState loadState(MinecraftServer server) {
+    rebuildCatalogs(server);
+    return server.overworld().getDataStorage().computeIfAbsent(UltsState.TYPE);
+  }
+
+  UltsRuntime(MinecraftServer server, UltsState state, LongSupplier ticks) {
+    this.server = server;
+    this.state = state;
+    this.ticks = ticks;
     inputs = new UltsInputManager(server, state);
   }
 
@@ -177,18 +200,73 @@ public final class UltsRuntime {
    * there is nothing to clear and the filter only hides them from the listings.
    */
   public void reload() {
+    reload(() -> rebuildCatalogs(server));
+  }
+
+  void reload(Runnable rebuild) {
     // The words a search is answered with are read from files too, so a language a server owner has
-    // just dropped in is picked up by the same command that rereads everything else.
+    // just dropped in is picked up by the same command that rereads everything else. What the stacking
+    // rule remembered goes with them, because the rule itself may have changed.
     UltsItemNames.clear();
-    rebuildCatalogs(server);
+    UltsStackKinds.clear();
+    rebuild.run();
+    invalidateCaches();
     if (state.purgeFiltered()) {
       UltsMod.LOGGER.info("UltStorage destroyed the stored stacks the special filter now dismisses");
     }
   }
 
+  /** Catalogues and rules changed, so even unchanged contents need new answers and remote slices. */
+  void invalidateCaches() {
+    packingAnswers.clear();
+    packingMode = null;
+    craftableView = null;
+    craftableLooseView = null;
+    craftableViewPool = new UltsCraftPool(4);
+    craftableMode = null;
+    craftableTick = Long.MIN_VALUE;
+    lastStock = null;
+    craftableWaits = 0;
+    craftableDeferred = false;
+    craftableViewStale = false;
+    craftableBudgetTick = Long.MIN_VALUE;
+    invalidateRemote();
+    state.invalidateViews();
+  }
+
   /** Whether a withdrawal may go ahead with no room in the inventory, dropping what does not fit. */
   public boolean allowFullInventory() {
     return UltsConfigManager.getInstance().data().input().allowFullInventory();
+  }
+
+  /**
+   * Hands a stack that could not be given to a player back to the storage it came from.
+   *
+   * <p>Void storage puts it back into its own pool. Remote storage has no pool of its own — its items sit
+   * in the containers a player bound — so the stack goes back into those containers, and what will not fit
+   * there is dropped at one of them. Writing it into the pool in remote mode would be writing it where
+   * nothing reads: a listing made of bound containers would never show it again.
+   *
+   * @param stack the stack being handed back, which this call takes over
+   */
+  public void putBack(ItemStack stack) {
+    if (stack.isEmpty()) {
+      return;
+    }
+    if (remote()) {
+      List<ItemStack> handing = List.of(stack);
+      if (!UltsRemoteStorage.restore(server, state.bindings(), handing) && !stack.isEmpty()) {
+        // Nothing in the warehouse and no drop beside it would take this remainder. Saying so is better
+        // than pretending: it goes into the saved recovery queue, outside filters and bag limits.
+        UltsMod.LOGGER.warn(
+            "UltStorage could not put x{} {} back into the remote storage; it is queued for recovery",
+            stack.getCount(), stack.getItem());
+        state.keepRemoteRecovery(handing);
+      }
+    } else {
+      state().deposit(stack);
+    }
+    stack.setCount(0);
   }
 
   /**
@@ -218,10 +296,12 @@ public final class UltsRuntime {
    * @param stock the listing to count it in
    */
   public static long storedAmount(ItemStack template, List<UltsStoredView> stock) {
+    // By the configured stacking rule, which is how a listing counts a row: the amount a row shows and the
+    // amount a click can take have to be the same number.
     long amount = 0L;
     for (UltsStoredView view : stock) {
-      if (ItemStack.isSameItemSameComponents(view.template(), template)) {
-        amount += view.amount();
+      if (UltsStackKinds.same(view.template(), template)) {
+        amount = UltsCraftMath.add(amount, view.amount());
       }
     }
     return amount;
@@ -246,23 +326,52 @@ public final class UltsRuntime {
   }
 
   /**
-   * Takes one row out of a bag, whole.
+   * Takes up to one inventory of pieces from a bag row.
    *
-   * <p>Void storage owns its rows, so the row that matches the stack is removed and comes back as it
-   * was stored, its time and its place among the other rows of that item untouched. Remote storage
-   * owns nothing — the containers a player bound do — so the stack is withdrawn from them instead.
+   * <p>The pieces come back with their stored components, and an unfinished row retains its timestamp.
+   * Remote storage withdraws them from the bound containers.
    *
    * @param item the item whose bag is being taken from
    * @param stack the stack that is leaving, components and all
-   * @return the stack that left, or an empty stack when it could not be taken
+   * @return the stacks that left, empty when none could be taken
    */
-  public ItemStack takeBagRow(Item item, ItemStack stack) {
-    if (remote()) {
-      List<ItemStack> taken = takePlanned(stack.copyWithCount(1), stack.getCount(), false);
-      invalidateRemote();
-      return taken.isEmpty() ? ItemStack.EMPTY : taken.getFirst();
+  public List<ItemStack> takeBagRow(Item item, ItemStack stack) {
+    return takeBagPieces(item, stack, rowPieces(stack));
+  }
+
+  /** A bounded, non-crafting withdrawal from one bag row, evaluated from live stock. */
+  public List<ItemStack> takeBagPieces(Item item, ItemStack stack, int quantity) {
+    quantity = Math.min(quantity, rowPieces(stack.copyWithCount(quantity)));
+    if (quantity <= 0 || !stack.is(item)) {
+      return List.of();
     }
-    return state.takeBagRow(item, stack);
+    if (remote()) {
+      // Read live amounts and hand over every output stack within this bounded request.
+      long available = UltsRemoteStorage.snapshot(server, state.bindings()).amount(stack);
+      int count = (int) Math.min(quantity, available);
+      List<ItemStack> taken = count <= 0 ? List.of()
+          : takePlanned(stack.copyWithCount(1), count, false, UltsCraftingMode.DISABLED);
+      invalidateRemote();
+      return taken;
+    }
+    ItemStack taken = state.takeBagPieces(item, stack, quantity);
+    return taken.isEmpty() ? List.of() : UltsWithdrawalOutput.stacks(taken, taken.getCount());
+  }
+
+  /**
+   * How much of one stored row may be asked for in one withdrawal.
+   *
+   * <p>A withdrawal is refused outright when it would need more result stacks than a backpack holds, and a
+   * row of an unstackable thing is one stack per piece: asking for a whole row of those would be asking
+   * for something no withdrawal agrees to, so such a row leaves in as many goes as it takes.
+   *
+   * @param stack the row, holding as many pieces as the storage has of it
+   * @return how many pieces may be asked for at once
+   */
+  private static int rowPieces(ItemStack stack) {
+    long most = (long) UltsWithdrawalPlanner.MAX_OUTPUT_STACKS
+        * Math.max(1, stack.getMaxStackSize());
+    return (int) Math.min(stack.getCount(), Math.min(most, Integer.MAX_VALUE));
   }
 
   public MinecraftServer server() {
@@ -344,6 +453,11 @@ public final class UltsRuntime {
     return remote() ? aggregate().items() : state.items();
   }
 
+  /** Clicks use loaded containers as they stand, bypassing the display's sharded cache. */
+  public List<UltsStoredView> storedItemsFresh() {
+    return remote() ? UltsRemoteStorage.snapshot(server, state.bindings()).items() : state.items();
+  }
+
   /** The configured crafting mode, which decides whether anything may be crafted at all. */
   public UltsCraftingMode craftingMode() {
     return UltsConfigManager.getInstance().data().input().crafting();
@@ -397,6 +511,15 @@ public final class UltsRuntime {
     return craftable(template, stock, true, true);
   }
 
+  /** Quick withdrawals measure the live stock once, even while the listing still shows an older slice. */
+  public int stackQuantity(ItemStack template) {
+    List<UltsStoredView> live = storedItemsFresh();
+    long held = storedAmount(template, live);
+    int maximum = Math.max(1, template.getMaxStackSize());
+    if (held >= maximum) return maximum;
+    return (int) Math.min(maximum, UltsCraftMath.add(held, craftableFresh(template, live)));
+  }
+
   /**
    * How much could be crafted if a station were stored.
    *
@@ -433,6 +556,34 @@ public final class UltsRuntime {
       defer();
     }
     return value;
+  }
+
+  /** Whether contents and their box can be supplied together, with the page's shared tick budget. */
+  public boolean canPack(ItemStack template, List<UltsStoredView> stock) {
+    long fingerprint = fingerprintOf(stock);
+    UltsCraftingMode mode = craftingMode();
+    if (fingerprint != packingFingerprint || mode != packingMode) {
+      packingAnswers.clear();
+      packingFingerprint = fingerprint;
+      packingMode = mode;
+    }
+    var key = new PackingKind(template.getItem(), template.getComponentsPatch());
+    Boolean known = packingAnswers.get(key);
+    if (known != null) return known;
+    UltsCraftPool pool = UltsCraftPool.of(stock);
+    if (!com.flwolfy.ults.data.state.UltsBoxes.isShulker(template)
+        && !template.isEmpty() && pool.amount(template) >= 27L * template.getMaxStackSize()
+        && pool.packableAmount() > 0L) {
+      packingAnswers.put(key, true);
+      return true;
+    }
+    long deadline = budget();
+    if (System.nanoTime() >= deadline) { defer(); return false; }
+    UltsWithdrawalPlan plan = UltsWithdrawalPlanner.plan(
+        pool, template, 1, true, mode, deadline);
+    if ("pending".equals(plan.problem())) { defer(); return false; }
+    packingAnswers.put(key, plan.available());
+    return plan.available();
   }
 
   /** Notes that an answer is still owed, so a screen showing them may redraw on a later tick. */
@@ -476,7 +627,7 @@ public final class UltsRuntime {
 
   /** How long this tick may still spend on craftable amounts; every tick starts over. */
   private long budget() {
-    long tick = server.getTickCount();
+    long tick = ticks.getAsLong();
     if (tick != craftableBudgetTick) {
       craftableBudgetTick = tick;
       craftableDeadline = System.nanoTime() + CRAFTABLE_NANOS_PER_TICK;
@@ -510,8 +661,8 @@ public final class UltsRuntime {
       return null;
     }
     long fingerprint = fingerprintOf(stock);
-    if (fingerprint != craftableFingerprint || mode != craftableMode) {
-      long tick = server.getTickCount();
+    if (craftableView == null || fingerprint != craftableFingerprint || mode != craftableMode) {
+      long tick = ticks.getAsLong();
       if (!fresh
           && craftableTick != Long.MIN_VALUE
           && tick - craftableTick < CRAFTABLE_REFRESH_TICKS) {
@@ -524,6 +675,7 @@ public final class UltsRuntime {
       UltsCraftPool pool = UltsCraftPool.of(stock);
       craftableViewPool = pool;
       craftableView = UltsCraftResolver.of(pool, mode, true);
+
       // The station-less view is only ever needed to explain a missing station, so it waits.
       craftableLooseView = null;
       craftableFingerprint = fingerprint;
@@ -531,6 +683,12 @@ public final class UltsRuntime {
       craftableTick = tick;
       craftableWaits = 0;
       craftableViewStale = false;
+      // A pass that stopped at its budget knows less than it could. Marking it after the reset is what
+      // makes the mark stick: screens then keep redrawing, and what the pass left out is not presented as
+      // something the storage cannot do.
+      if (craftableView.reachTruncated()) {
+        craftableViewStale = true;
+      }
     }
     return requireStation ? craftableView : looseView();
   }
@@ -598,7 +756,7 @@ public final class UltsRuntime {
       return state.takePlanned(plan, template, quantity, boxed);
     }
     List<ItemStack> outputs = UltsRemoteStorage.take(
-        server, state.bindings(), template, quantity, boxed, mode);
+        server, state.bindings(), state, template, quantity, boxed, mode);
     invalidateRemote();
     return outputs;
   }
@@ -620,7 +778,7 @@ public final class UltsRuntime {
     watch();
     if (shardsStale) {
       for (int shard = 0; shard < REMOTE_SHARDS; shard++) {
-        remoteShards[shard] = UltsRemoteStorage.snapshot(server, slice(shard));
+        remoteShards[shard] = UltsRemoteStorage.snapshotShard(server, slice(shard), ++shardGeneration);
       }
       shardsStale = false;
       shardCursor = 0;
@@ -630,7 +788,7 @@ public final class UltsRuntime {
       advanceShards();
     }
     if (merged == null) {
-      merged = UltsRemoteStorage.merge(List.of(remoteShards));
+      merged = UltsRemoteStorage.mergeShards(List.of(remoteShards));
     }
     return merged;
   }
@@ -642,13 +800,14 @@ public final class UltsRuntime {
       return;
     }
     shardTick = tick;
-    remoteShards[shardCursor] = UltsRemoteStorage.snapshot(server, slice(shardCursor));
+    remoteShards[shardCursor] = UltsRemoteStorage.snapshotShard(
+        server, slice(shardCursor), ++shardGeneration);
     shardCursor = (shardCursor + 1) % REMOTE_SHARDS;
     merged = null;
     remoteRevision++;
   }
 
-  /** The bindings of one slice; a container always belongs to the same slice. */
+  /** Binding partition. Physical inventory provenance is deduplicated across slice snapshots. */
   private List<UltsBinding> slice(int shard) {
     List<UltsBinding> all = state.bindings();
     if (REMOTE_SHARDS == 1) {
@@ -677,7 +836,9 @@ public final class UltsRuntime {
 
   /** A bound container was destroyed: that single binding is dropped and everyone is told. */
   public void onBlockBroken(Level level, BlockPos position) {
-    UltsBinding binding = state.binding(level.dimension().identifier().toString(), position);
+    String dimension = level.dimension().identifier().toString();
+    UltsBinding binding = breakingBindings.remove(new BrokenPart(dimension, position));
+    if (binding == null) binding = state.binding(dimension, position);
     if (binding == null) {
       return;
     }
@@ -695,11 +856,18 @@ public final class UltsRuntime {
    * large one included, and only a sneaking player can take it down.
    */
   public boolean allowBreak(Player player, Level level, BlockPos position) {
-    if (player == null || !(level instanceof ServerLevel serverLevel)
-        || player.isShiftKeyDown()) {
+    if (player == null || !(level instanceof ServerLevel serverLevel)) {
       return true;
     }
-    if (!bound(serverLevel, position)) {
+    UltsBinding binding = bindingAt(serverLevel, position);
+    if (binding == null) {
+      return true;
+    }
+    if (player.isShiftKeyDown()) {
+      // After the break, the other halves can no longer be discovered from the removed block.
+      // Remember the binding here, but remove it only when AFTER confirms the break succeeded.
+      breakingBindings.put(new BrokenPart(level.dimension().identifier().toString(),
+          position.immutable()), binding);
       return true;
     }
     if (player instanceof ServerPlayer serverPlayer) {
@@ -714,17 +882,6 @@ public final class UltsRuntime {
         protectedNotices.put(serverPlayer.getUUID(), tick);
         serverPlayer.sendSystemMessage(UltsTextBuilder.info(
             UltsLangManager.getInstance().text("ults.input.protected")));
-      }
-    }
-    return false;
-  }
-
-  /** True when this position, or the other half of its large container, is bound. */
-  private boolean bound(ServerLevel level, BlockPos position) {
-    String dimension = level.dimension().identifier().toString();
-    for (BlockPos part : UltsContainers.parts(level, position)) {
-      if (state.binding(dimension, part) != null) {
-        return true;
       }
     }
     return false;
@@ -745,6 +902,12 @@ public final class UltsRuntime {
   }
 
   void tick() {
+    // BEFORE/AFTER are synchronous. Anything left here was cancelled by another break listener.
+    breakingBindings.clear();
+    if (server.getTickCount() % 20 == 0
+        && state.retryRemoteRecovery(stacks -> UltsRemoteStorage.restore(server, state.bindings(), stacks))) {
+      invalidateRemote();
+    }
     if (server.getTickCount() % 600 == 0) {
       long now = server.getTickCount();
       protectedNotices.entrySet().removeIf(entry -> now - entry.getValue() > 600);
@@ -779,6 +942,7 @@ public final class UltsRuntime {
     UltsStorageSGUI.refreshAll(this);
     UltsWithdrawSGUI.refreshAll(this);
     UltsBagSGUI.refreshAll(this);
+    UltsTakeAllSGUI.refreshAll(this);
   }
 
   /** Shows "#N note" over the action bar while a player looks at a bound container. */
@@ -793,6 +957,12 @@ public final class UltsRuntime {
     for (ServerPlayer player : server.getPlayerList().getPlayers()) {
       if (!(player.pick(LOOK_REACH, 1.0F, false) instanceof BlockHitResult hit)
           || hit.getType() != HitResult.Type.BLOCK) {
+        continue;
+      }
+      // The cheap question first: walking the parts of a large container is only worth doing when what is
+      // being looked at is a container at all, and most of what a player looks at is not.
+      if (!(player.level() instanceof ServerLevel level)
+          || !UltsContainers.hasContainer(level, hit.getBlockPos())) {
         continue;
       }
       UltsBinding binding = bindingAt(player.level(), hit.getBlockPos());

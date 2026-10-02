@@ -94,8 +94,7 @@ class UltsLanguageLoaderTest {
     String resource = "/assets/" + UltsMod.MOD_ID + "/lang/" + locale + ".json";
     try (var stream = UltsLanguageLoaderTest.class.getResourceAsStream(resource)) {
       assertNotNull(stream, resource + " is missing from the build");
-      return new JsonParser()
-          .parse(new InputStreamReader(stream, StandardCharsets.UTF_8))
+      return JsonParser.parseReader(new InputStreamReader(stream, StandardCharsets.UTF_8))
           .getAsJsonObject()
           .entrySet()
           .stream()

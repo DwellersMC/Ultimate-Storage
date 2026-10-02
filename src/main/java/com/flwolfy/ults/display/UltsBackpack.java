@@ -56,7 +56,8 @@ final class UltsBackpack {
    * @return how many of them fit
    */
   static int fitting(List<ItemStack> slots, List<ItemStack> stacks) {
-    List<ItemStack> working = new ArrayList<>(slots);
+    List<ItemStack> working = new ArrayList<>(slots.size());
+    slots.forEach(stack -> working.add(stack.copy()));
     int fitting = 0;
     for (ItemStack stack : stacks) {
       if (!place(working, stack)) {
@@ -74,10 +75,51 @@ final class UltsBackpack {
    * answer for one stack after another.
    *
    * @param slots the backpack being filled, which is changed
-   * @param stack the stack being handed over
+   * @param stack the stack being handed over, which is not changed
    * @return whether all of it fitted
    */
   static boolean place(List<ItemStack> slots, ItemStack stack) {
+    return fill(slots, stack).isEmpty();
+  }
+
+  /**
+   * Puts one stack into a player's real backpack and answers what did not fit.
+   *
+   * <p>This exists because the game's own hand-over cannot be trusted to say what it did: it takes the
+   * stack as a piece of work and may leave it empty while the backpack never received a single piece, so
+   * a caller that hands a stack over and then looks at it is told the items went somewhere when in truth
+   * they went nowhere. Here the stack is left alone and the leftover comes back as a stack of its own, so
+   * what did not fit can be dropped or handed back.
+   *
+   * @param player the player receiving
+   * @param stack the stack being handed over, which is not changed
+   * @return what did not fit, empty when all of it went in
+   */
+  static ItemStack placeInto(ServerPlayer player, ItemStack stack) {
+    List<ItemStack> trial = slots(player);
+    ItemStack remaining = fill(trial, stack);
+    for (int slot = 0; slot < SLOTS; slot++) {
+      ItemStack before = player.getInventory().getItem(slot);
+      ItemStack after = trial.get(slot);
+      if (before.getCount() != after.getCount()
+          || !ItemStack.isSameItemSameComponents(before, after)) {
+        player.getInventory().setItem(slot, after);
+      }
+    }
+    return remaining;
+  }
+
+  /**
+   * Fills a backpack with one stack, topping up stacks of the same thing before opening new slots.
+   *
+   * <p>This is the one place the filling rules live: {@link #place} asks whether a stack would fit whole,
+   * and {@link #placeInto} hands a real player one and keeps what did not fit.
+   *
+   * @param slots the backpack being filled, which is changed
+   * @param stack the stack being handed over, which is not changed
+   * @return what did not fit
+   */
+  static ItemStack fill(List<ItemStack> slots, ItemStack stack) {
     ItemStack remaining = stack.copy();
     for (ItemStack current : slots) {
       if (remaining.isEmpty()) {
@@ -99,6 +141,6 @@ final class UltsBackpack {
       slots.set(slot, remaining.copyWithCount(moved));
       remaining.shrink(moved);
     }
-    return remaining.isEmpty();
+    return remaining;
   }
 }

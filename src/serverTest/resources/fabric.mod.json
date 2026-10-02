@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "id": "ults-server-acceptance",
+  "version": "1.0.0",
+  "name": "UltStorage isolated server acceptance",
+  "environment": "server",
+  "entrypoints": { "main": ["com.flwolfy.ults.acceptance.UltsServerAcceptance"] },
+  "depends": { "ultimate-storage": "*" }
+}

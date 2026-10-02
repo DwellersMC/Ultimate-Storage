@@ -10,7 +10,6 @@ import java.util.ArrayList;
 import java.util.List;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
-import net.minecraft.world.item.crafting.Ingredient;
 
 /**
  * Decides whether a withdrawal can run, and what has to be crafted for it.
@@ -28,7 +27,7 @@ public final class UltsWithdrawalPlanner {
   /** How many slots one shulker box holds. */
   private static final int SHULKER_SLOTS = 27;
   /** More result stacks than this do not fit into a player inventory. */
-  private static final int MAX_OUTPUT_STACKS = 36;
+  public static final int MAX_OUTPUT_STACKS = 36;
 
   private UltsWithdrawalPlanner() {}
 
@@ -48,6 +47,14 @@ public final class UltsWithdrawalPlanner {
       int quantity,
       boolean boxed,
       UltsCraftingMode mode
+  ) {
+    return plan(pool, template, quantity, boxed, mode, System.nanoTime() + 250_000_000L);
+  }
+
+  /** A preview shares its caller's budget; an unfinished search is reported as pending. */
+  public static UltsWithdrawalPlan plan(
+      UltsCraftPool pool, ItemStack template, int quantity, boolean boxed,
+      UltsCraftingMode mode, long deadline
   ) {
     long itemAvailable = pool.amount(template);
     long boxAvailable = pool.packableAmount();
@@ -69,68 +76,52 @@ public final class UltsWithdrawalPlanner {
       return unavailable("too_large", itemAvailable, required, boxAvailable, boxRequired);
     }
 
-    // The boxes are decided first: a box is made from what the storage holds, and only what is left
-    // after that is available for the item itself. The request itself is off limits to both plans for
-    // as long as they are worked out, so a recipe on the way can never eat what has to be handed over.
-    pool.keep(template, required);
-    long missingPlain = boxed ? Math.max(0L, boxRequired - plainAvailable) : 0L;
-    UltsCraftPlan boxPlan = UltsCraftPlan.NONE;
-    if (missingPlain > 0L) {
-      UltsCraftPlan wanted = UltsCraftResolver.plan(plainBox(), missingPlain, pool, mode, true);
-      if (wanted == null) {
-        // Not every missing box can be crafted; the other colours may cover what is left over.
-        long possible = Math.min(
-            missingPlain, UltsCraftResolver.capacity(plainBox(), pool, mode, true));
-        wanted = possible > 0L
-            ? UltsCraftResolver.plan(plainBox(), possible, pool, mode, true)
-            : UltsCraftPlan.NONE;
+    int mark = pool.mark();
+    UltsCraftPool.Keep incoming = pool.keepState();
+    List<UltsStoredView> originalBoxes = new ArrayList<>(pool.packableViews(true));
+    originalBoxes.addAll(pool.packableViews(false));
+    pool.reserve(template, required);
+    try {
+      UltsCraftResolver resolver = UltsCraftResolver.of(pool, mode, true);
+      // Prefer plain boxes, but only if their materials leave enough for the contents. Every box
+      // allocation remains provisional until the contents and final packaging check both succeed.
+      long most = boxed ? Math.max(0L, boxRequired - plainAvailable) : 0L;
+      long least = boxed ? Math.max(0L, boxRequired - boxAvailable) : 0L;
+      for (long crafted = most; crafted >= least; crafted--) {
+        var goals = new ArrayList<UltsCraftResolver.Goal>();
+        if (crafted > 0L) goals.add(new UltsCraftResolver.Goal(
+            plainBox(), UltsCraftMath.add(pool.amount(plainBox()), crafted)));
+        goals.add(new UltsCraftResolver.Goal(template, required));
+        List<UltsCraftPlan> plans = resolver.planTogether(goals,
+            () -> !boxed || pool.packableAmount() >= boxRequired, deadline);
+        if (plans == null) {
+          if (resolver.ranOut()) {
+            pool.rollback(mark);
+            return unavailable("pending", itemAvailable, required, boxAvailable, boxRequired);
+          }
+          continue;
+        }
+        List<ItemStack> outputs = boxed
+            ? packedBoxes(pool, template, boxRequired)
+            : UltsWithdrawalOutput.looseStacks(template, quantity);
+        List<UltsCraftStep> steps = plans.stream().flatMap(plan -> plan.steps().stream()).toList();
+        long storedUsed = boxed ? storedBoxesUsed(pool, originalBoxes, boxRequired) : 0L;
+        return new UltsWithdrawalPlan(
+            true, "", itemAvailable, required, boxAvailable, boxRequired,
+            storedUsed, boxRequired - storedUsed, outputs,
+            Math.max(0L, required - itemAvailable), steps);
       }
-      if (wanted == null) {
-        pool.keep(null, 0L);
-        return unavailable("boxes", itemAvailable, required, boxAvailable, boxRequired);
-      }
-      boxPlan = wanted;
-    }
-    // What the request is short of is crafted; the pile is left holding the result of those runs.
-    long missingItems = Math.max(0L, required - itemAvailable);
-    UltsCraftPlan itemPlan = missingItems > 0L
-        ? UltsCraftResolver.plan(template, missingItems, pool, mode, true)
-        : UltsCraftPlan.NONE;
-    if (itemPlan == null) {
-      pool.keep(null, 0L);
-      return unavailable("items", itemAvailable, required, boxAvailable, boxRequired);
-    }
-    pool.keep(null, 0L);
-    if (pool.amount(template) < required) {
-      return unavailable("items", itemAvailable, required, boxAvailable, boxRequired);
-    }
-    if (boxed && pool.packableAmount() < boxRequired) {
-      return unavailable("boxes", itemAvailable, required, boxAvailable, boxRequired);
-    }
-
-    long plainUsed = Math.min(plainAvailable, boxRequired);
-    long craftedUsed = Math.min(boxPlan.output(), boxRequired - plainUsed);
-    long otherUsed = Math.max(0L, boxRequired - plainUsed - craftedUsed);
-    List<ItemStack> outputs = boxed
-        ? packedBoxes(pool, template, boxRequired, plainUsed + craftedUsed, otherUsed)
-        : UltsWithdrawalOutput.looseStacks(template, quantity);
-    if (outputs.size() < outputCount) {
-      return unavailable("boxes", itemAvailable, required, boxAvailable, boxRequired);
-    }
-    // The runs are recorded in the order they were worked out, so running them again on another pile
-    // of the same contents leads to the same result.
-    List<UltsCraftStep> steps = new ArrayList<>(boxPlan.steps());
-    steps.addAll(itemPlan.steps());
-    return new UltsWithdrawalPlan(
-        true, "", itemAvailable, required, boxAvailable, boxRequired,
-        plainUsed + otherUsed, craftedUsed, outputs, missingItems, steps);
+      pool.rollback(mark);
+      return unavailable(boxed && boxAvailable < boxRequired && itemAvailable >= required
+          ? "boxes" : "items", itemAvailable, required, boxAvailable, boxRequired);
+    } finally { pool.restoreKeep(incoming); }
   }
 
   /**
    * Runs a plan on a pile: every run takes its ingredients and puts what it makes back in, and the
    * request is then taken out of the pile.
    *
-   * @param pool the pile to work on; a failed run may have left it partly used
+   * @param pool the pile to work on; a failed run restores it
    * @param plan the plan to run
    * @param template what is withdrawn
    * @param quantity how much is withdrawn
@@ -147,21 +138,24 @@ public final class UltsWithdrawalPlanner {
     long required = boxed
         ? UltsCraftMath.multiply(quantity, UltsCraftMath.multiply(SHULKER_SLOTS, template.getMaxStackSize()))
         : quantity;
-    pool.keep(template, required);
-    for (UltsCraftStep step : plan.steps()) {
-      for (Ingredient ingredient : step.recipe().ingredients()) {
-        if (pool.takeMatching(ingredient, step.operations()) < step.operations()) {
-          pool.keep(null, 0L);
-          return false;
-        }
+    // Marks the pile before any of it is touched: a run that cannot finish puts back what it had already
+    // taken, so a caller is never left with ingredients spent and nothing to show for them.
+    if (!plan.available() || template.isEmpty() || quantity < 1) return false;
+    int mark = pool.mark();
+    UltsCraftPool.Keep incoming = pool.keepState();
+    pool.reserve(template, required);
+    try {
+      for (UltsCraftStep step : plan.steps()) {
+        if (!step.run(pool)) { pool.rollback(mark); return false; }
       }
-      pool.add(step.recipe().result(), step.output());
-    }
-    pool.keep(null, 0L);
-    if (pool.take(template, required) < required) {
-      return false;
-    }
-    return !boxed || pool.takePackable(quantity) >= quantity;
+      pool.restoreKeep(incoming);
+      if (pool.take(template, required) < required
+          || (boxed && pool.takePackable(quantity) < quantity)) {
+        pool.rollback(mark);
+        return false;
+      }
+      return true;
+    } finally { pool.restoreKeep(incoming); }
   }
 
   private static UltsWithdrawalPlan unavailable(
@@ -183,27 +177,34 @@ public final class UltsWithdrawalPlanner {
   private static List<ItemStack> packedBoxes(
       UltsCraftPool pool,
       ItemStack template,
-      int quantity,
-      long plainBoxes,
-      long otherBoxes
+      int quantity
   ) {
     List<ItemStack> result = new ArrayList<>(quantity);
-    for (long index = 0; index < plainBoxes && result.size() < quantity; index++) {
-      result.add(UltsWithdrawalOutput.packedBox(plainBox(), template));
-    }
-    long remaining = Math.min(otherBoxes, quantity - result.size());
-    if (remaining > 0L) {
-      for (UltsStoredView view : pool.packableViews(false)) {
-        for (long index = 0; index < view.amount() && remaining > 0L; index++) {
+    for (boolean plain : new boolean[]{true, false}) {
+      for (UltsStoredView view : pool.packableViews(plain)) {
+        for (long index = 0; index < view.amount() && result.size() < quantity; index++) {
           result.add(UltsWithdrawalOutput.packedBox(view.template(), template));
-          remaining--;
         }
-        if (remaining <= 0L) {
-          break;
-        }
+        if (result.size() == quantity) return List.copyOf(result);
       }
     }
     return List.copyOf(result);
+  }
+
+  /** Counts the original boxes actually selected by the same order used for packing and replay. */
+  private static long storedBoxesUsed(UltsCraftPool pool, List<UltsStoredView> original, int quantity) {
+    long stored = 0L, remaining = quantity;
+    for (boolean plain : new boolean[]{true, false}) {
+      for (UltsStoredView box : pool.packableViews(plain)) {
+        long used = Math.min(remaining, box.amount());
+        long before = original.stream().filter(view -> UltsStackKinds.same(view.template(), box.template()))
+            .mapToLong(UltsStoredView::amount).findFirst().orElse(0L);
+        stored += Math.min(used, before);
+        remaining -= used;
+        if (remaining == 0L) return stored;
+      }
+    }
+    return stored;
   }
 
   /** One item of the uncolored shulker box, the only box that may be crafted. */

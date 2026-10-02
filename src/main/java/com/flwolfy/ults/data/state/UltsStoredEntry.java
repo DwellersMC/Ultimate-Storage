@@ -18,7 +18,9 @@ record UltsStoredEntry(ItemStack template, long amount, long updatedAt) {
   static final Codec<UltsStoredEntry> CODEC = RecordCodecBuilder.create(instance ->
       instance.group(
           ItemStack.CODEC.fieldOf("stack").forGetter(UltsStoredEntry::template),
-          Codec.LONG.fieldOf("amount").forGetter(UltsStoredEntry::amount),
+          // Read as optional: a file that lost the field is a stack of no size rather than a file that
+          // cannot be read, and the storage drops what holds nothing on the way in.
+          Codec.LONG.optionalFieldOf("amount", 0L).forGetter(UltsStoredEntry::amount),
           Codec.LONG.optionalFieldOf("updatedAt", 0L).forGetter(UltsStoredEntry::updatedAt)
       ).apply(instance, UltsStoredEntry::new)
   );

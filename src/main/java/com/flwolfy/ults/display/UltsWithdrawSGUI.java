@@ -153,6 +153,13 @@ public final class UltsWithdrawSGUI extends UltsAnvilInputGui {
     if (!confirmable) {
       confirm.addLoreLine(problem(plan, quantity).copy()
           .withStyle(ChatFormatting.RED));
+      if (plan.available() && !inventorySpace) {
+        // Only the backpack is in the way, and the option that would let the rest fall to the ground is
+        // off. Where that option lives is worth saying: it sits in the server's own file, so a player
+        // cannot reach it from their side of the game.
+        confirm.addLoreLine(UltsGuiText.text("ults.withdraw.problem.inventory.hint").copy()
+            .withStyle(ChatFormatting.GRAY));
+      }
     } else {
       confirm.addLoreLine(UltsGuiText.text(boxed
           ? "ults.withdraw.confirm.box" : "ults.withdraw.confirm.item", quantity)
@@ -163,7 +170,7 @@ public final class UltsWithdrawSGUI extends UltsAnvilInputGui {
       }
       confirm.setCallback(() -> {
         UltsGuiSound.confirm(player);
-        confirm(quantity, overflowToGround);
+        confirm(quantity);
       });
     }
     setSlot(2, confirm.build());
@@ -175,8 +182,10 @@ public final class UltsWithdrawSGUI extends UltsAnvilInputGui {
     returnTo.run();
   }
 
-  private void confirm(int quantity, boolean overflowToGround) {
+  private void confirm(int quantity) {
+    UltsGuiGive.Delivery delivery;
     synchronized (runtime.state()) {
+      boolean overflowToGround = runtime.allowFullInventory();
       UltsWithdrawalPlan plan = runtime.withdrawalPlan(template, quantity, boxed);
       if (!plan.available() || !(canFit(player, plan.outputs()) || overflowToGround)) {
         render();
@@ -187,12 +196,13 @@ public final class UltsWithdrawSGUI extends UltsAnvilInputGui {
         render();
         return;
       }
-      UltsGuiGive.hand(player, runtime, outputs, overflowToGround);
+      delivery = UltsGuiGive.handWithFeedback(player, runtime, outputs, overflowToGround);
     }
+    if (delivery.delivered() == 0L) { render(); return; }
     player.sendSystemMessage(UltsTextBuilder.success(UltsTextBuilder.format(
         UltsGuiText.text(boxed ? "ults.withdraw.success.box" : "ults.withdraw.success.item"),
         UltsTextBuilder.TEXT, UltsTextBuilder.HIGHLIGHT,
-        quantity, template.getHoverName().getString())));
+        delivery.delivered(), template.getHoverName().getString())));
     close();
     returnTo.run();
   }
@@ -203,6 +213,7 @@ public final class UltsWithdrawSGUI extends UltsAnvilInputGui {
     }
     if (!plan.available()) {
       return switch (plan.problem()) {
+        case "pending" -> UltsGuiText.text("ults.withdraw.problem.pending");
         case "nested_box" -> UltsGuiText.text("ults.withdraw.problem.nested_box");
         case "too_large" -> UltsGuiText.text("ults.withdraw.problem.too_large");
         case "items" -> UltsGuiText.text(

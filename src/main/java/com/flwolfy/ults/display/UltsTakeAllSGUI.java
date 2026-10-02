@@ -1,5 +1,6 @@
 package com.flwolfy.ults.display;
 
+import com.flwolfy.ults.crafting.UltsCraftMath;
 import com.flwolfy.ults.UltsRuntime;
 import com.flwolfy.ults.data.config.UltsCraftingMode;
 import com.flwolfy.ults.data.state.UltsStoredView;
@@ -7,6 +8,7 @@ import eu.pb4.sgui.api.elements.GuiElementBuilder;
 import eu.pb4.sgui.api.gui.SimpleGui;
 import java.util.ArrayList;
 import java.util.List;
+import java.lang.ref.WeakReference;
 import net.minecraft.ChatFormatting;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
@@ -45,17 +47,29 @@ public final class UltsTakeAllSGUI extends SimpleGui {
   private static final int BACK_SLOT = 2;
   private static final int MODE_SLOT = 4;
   private static final int CONFIRM_SLOT = 6;
+  private static final List<WeakReference<UltsTakeAllSGUI>> OPEN_MENUS = new ArrayList<>();
 
   private final UltsRuntime runtime;
   private final Runnable returnTo;
   /** The stacks everything means, in the order they would leave: one item, or a whole bag's rows. */
-  private final List<ItemStack> wanted;
+  private List<ItemStack> wanted;
   /** How many pieces each of those stacks holds, so a stack that leaves can be counted. */
-  private final List<Long> amounts;
-  private final long stored;
-  private final long craftable;
+  private List<Long> amounts;
+  private final Item bagItem;
+  /**
+   * What the storage holds of this, and what could be crafted of it.
+   *
+   * <p>Both are asked again every time the screen draws or decides, rather than kept from the moment it
+   * opened: on a server of several players the warehouse can be emptied while the screen is open, and a
+   * button that still says "2,000" would start a pour for items that are no longer there.
+   */
+  private long stored;
+  private long craftable;
+  /** Whether this is about a whole bag rather than about one item, which the counting follows. */
+  private final boolean wholeBag;
   /** Whether the recipes may fill in what the storage is short of, which the mode slot switches. */
   private boolean crafting;
+  private long renderedRevision;
 
   private UltsTakeAllSGUI(
       ServerPlayer player,
@@ -64,7 +78,9 @@ public final class UltsTakeAllSGUI extends SimpleGui {
       List<ItemStack> wanted,
       List<Long> amounts,
       long stored,
-      long craftable
+      long craftable,
+      boolean wholeBag,
+      Item bagItem
   ) {
     super(MenuType.GENERIC_9x1, player, false);
     this.runtime = runtime;
@@ -73,8 +89,11 @@ public final class UltsTakeAllSGUI extends SimpleGui {
     this.amounts = List.copyOf(amounts);
     this.stored = stored;
     this.craftable = craftable;
+    this.wholeBag = wholeBag;
+    this.bagItem = bagItem;
     setTitle(UltsGuiText.text("ults.all.title"));
     setLockPlayerInventory(true);
+    OPEN_MENUS.add(new WeakReference<>(this));
     render();
   }
 
@@ -94,13 +113,13 @@ public final class UltsTakeAllSGUI extends SimpleGui {
     if (!runtime.allowTakeAll()) {
       return null;
     }
-    List<UltsStoredView> stock = runtime.storedItems();
+    List<UltsStoredView> stock = runtime.storedItemsFresh();
     // Asked afresh, because this screen is opened by a click: the amounts it shows are the ones the
     // player is answering about, so they may not come from a listing that is a moment behind.
     long stored = UltsRuntime.storedAmount(template, stock);
     UltsTakeAllSGUI screen = new UltsTakeAllSGUI(
         player, runtime, returnTo, List.of(template.copyWithCount(1)), List.of(stored),
-        stored, runtime.craftableFresh(template, stock));
+        stored, runtime.craftableFresh(template, stock), false, null);
     screen.open();
     return screen;
   }
@@ -124,25 +143,83 @@ public final class UltsTakeAllSGUI extends SimpleGui {
     long stored = 0L;
     List<ItemStack> stacks = new ArrayList<>();
     List<Long> amounts = new ArrayList<>();
-    for (UltsStoredView row : runtime.specialsOf(item)) {
-      stored += row.amount();
+    for (UltsStoredView row : bagStock(item, runtime.storedItemsFresh()).rows()) {
+      stored = UltsCraftMath.add(stored, row.amount());
       stacks.add(row.template());
       amounts.add(row.amount());
     }
     // Nothing in a bag is made by a recipe: those are the stacks somebody put in.
     UltsTakeAllSGUI screen = new UltsTakeAllSGUI(
-        player, runtime, returnTo, stacks, amounts, stored, 0L);
+        player, runtime, returnTo, stacks, amounts, stored, 0L, true, item);
     screen.open();
     return screen;
   }
 
   private long total(boolean withCrafting) {
-    return stored + (withCrafting ? craftable : 0L);
+    return UltsCraftMath.add(stored, withCrafting ? craftable : 0L);
+  }
+
+  /**
+   * Asks the storage again for what it holds of this.
+   *
+   * <p>A bag is counted from its rows as they stand, and a single item from the storage as it stands. The
+   * craftable amount goes through the ordinary answer rather than a fresh search, because this runs as the
+   * screen draws.
+   */
+  private void refreshTotals() {
+    refreshTotals(false);
+  }
+
+  private void refreshTotals(boolean fresh) {
+    if (wholeBag) {
+      List<UltsStoredView> stock = fresh ? runtime.storedItemsFresh() : runtime.storedItems();
+      BagStock bag = bagStock(bagItem, stock);
+      wanted = bag.rows().stream().map(UltsStoredView::template).toList();
+      amounts = bag.rows().stream().map(UltsStoredView::amount).toList();
+      stored = bag.total();
+      craftable = 0L;
+      return;
+    }
+    if (wanted.isEmpty()) {
+      // A bag that was emptied while its screen was open: there is nothing to count, and asking would
+      // throw where a redraw is expected.
+      stored = 0L;
+      craftable = 0L;
+      return;
+    }
+    List<UltsStoredView> stock = fresh ? runtime.storedItemsFresh() : runtime.storedItems();
+    stored = UltsRuntime.storedAmount(wanted.getFirst(), stock);
+    craftable = fresh ? runtime.craftableFresh(wanted.getFirst(), stock)
+        : runtime.craftable(wanted.getFirst(), stock);
   }
 
   /** Whether a mode is on offer: taking what is stored needs something stored, crafting needs a recipe. */
   private boolean modeOffered(boolean withCrafting) {
     return withCrafting ? craftable > 0L : stored > 0L;
+  }
+
+  record BagStock(List<UltsStoredView> rows, long total) {}
+
+  static BagStock bagStock(Item item, List<UltsStoredView> stock) {
+    List<UltsStoredView> rows = stock.stream()
+        .filter(row -> row.special() && row.template().is(item) && row.amount() > 0)
+        .sorted(java.util.Comparator.comparingLong(UltsStoredView::updatedAt).reversed())
+        .toList();
+    return new BagStock(rows, rows.stream().map(UltsStoredView::amount).reduce(0L, UltsCraftMath::add));
+  }
+
+  public static void refreshAll(UltsRuntime runtime) {
+    OPEN_MENUS.removeIf(reference -> {
+      UltsTakeAllSGUI gui = reference.get();
+      if (gui == null || !gui.isOpen()) {
+        return true;
+      }
+      if (gui.runtime == runtime
+          && (gui.renderedRevision != runtime.contentRevision() || runtime.craftablePending())) {
+        gui.render();
+      }
+      return false;
+    });
   }
 
   /**
@@ -154,12 +231,17 @@ public final class UltsTakeAllSGUI extends SimpleGui {
    * @param withCrafting whether the recipes may fill in what the storage is short of
    */
   private UltsTakeAllPlan plan(boolean withCrafting) {
+    // The totals are asked for once per draw and once per click, never here: a draw would otherwise ask
+    // the storage twice for the same answer, and a craftable answer nobody could work out in time would
+    // have its wait counted off twice as fast as the budget intends.
     return UltsTakeAllPlan.of(
         total(withCrafting), wanted, amounts, runtime.allowFullInventory(),
         runtime.takeAllStacks(), UltsBackpack.slots(player));
   }
 
   private void render() {
+    renderedRevision = runtime.contentRevision();
+    refreshTotals();
     GuiElementBuilder filler = element(Items.STAINED_GLASS_PANE.gray()).setName(Component.empty());
     for (int slot = 0; slot < getVirtualSize(); slot++) {
       setSlot(slot, filler.build());
@@ -284,6 +366,13 @@ public final class UltsTakeAllSGUI extends SimpleGui {
    * @param withCrafting whether the recipes may fill in what the storage is short of
    */
   private void confirm(boolean withCrafting) {
+    if (!runtime.allowTakeAll()) {
+      close();
+      returnTo.run();
+      return;
+    }
+    // A click is answered from the storage as it stands, not from the numbers the last draw was made of.
+    refreshTotals(true);
     UltsTakeAllPlan plan = plan(withCrafting);
     if (!plan.possible()) {
       UltsGuiSound.click(player);
@@ -296,9 +385,9 @@ public final class UltsTakeAllSGUI extends SimpleGui {
     UltsGuiSound.confirm(player);
     close();
     UltsTakeAllStream.start(
-        runtime, player, wanted, amounts,
+        runtime, player, wanted, plan.amounts(),
         withCrafting ? runtime.craftingMode() : UltsCraftingMode.DISABLED,
-        plan.taken());
+        wholeBag);
     returnTo.run();
   }
 

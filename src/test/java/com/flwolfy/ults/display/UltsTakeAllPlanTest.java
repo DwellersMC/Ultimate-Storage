@@ -147,7 +147,7 @@ class UltsTakeAllPlanTest {
       slots.set(slot, ItemStack.EMPTY);
     }
     UltsTakeAllPlan plan = UltsTakeAllPlan.of(32L, bag, amounts, false, LIMIT, slots);
-    assertEquals(2, plan.units());
+    assertEquals(16, plan.units());
     assertEquals(16L, plan.taken());
     assertEquals(16L, plan.pack());
     assertEquals(0L, plan.ground());
@@ -155,16 +155,16 @@ class UltsTakeAllPlanTest {
 
     // With room for everything, all four rows fit and all four leave.
     UltsTakeAllPlan plenty = UltsTakeAllPlan.of(32L, bag, amounts, false, LIMIT, empty());
-    assertEquals(4, plenty.units());
+    assertEquals(32, plenty.units());
     assertEquals(32L, plenty.taken());
     assertEquals(32L, plenty.pack());
     assertEquals(0L, plenty.left());
 
-    // The limit still bounds a bag: two rows is two rows, however much room the backpack has.
+    // A group of eight unstackable swords costs eight stacks; a limit of two takes two swords.
     UltsTakeAllPlan limited = UltsTakeAllPlan.of(32L, bag, amounts, false, 2, empty());
     assertEquals(2, limited.units());
-    assertEquals(16L, limited.taken());
-    assertEquals(16L, limited.left());
+    assertEquals(2L, limited.taken());
+    assertEquals(30L, limited.left());
   }
 
   private static List<ItemStack> empty() {

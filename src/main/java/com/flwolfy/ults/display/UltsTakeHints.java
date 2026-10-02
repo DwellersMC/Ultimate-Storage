@@ -9,7 +9,6 @@ import java.util.List;
 import net.minecraft.ChatFormatting;
 import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.world.item.ItemStack;
-import net.minecraft.world.item.Items;
 
 /**
  * What the lore of a row promises about the clicks it answers.
@@ -82,27 +81,26 @@ final class UltsTakeHints {
    * for.
    *
    * <p>Enough of the item has to be on hand, the thing has to be allowed into a box, and a box has to
-   * be there to fill — either one the storage already holds or a plain one it could craft. Nothing is
-   * resolved here: the box is packed for real on the click, and a click that cannot be served says so.
+   * be there to fill — either one the storage already holds or a plain one it could craft. The contents and box
+   * are planned together, so recipes cannot promise the same material to both. The click checks again
+   * against live stock.
    *
    * @param runtime the storage the row was drawn from
    * @param template what the row stands for
    * @param stock contents to craft from, so a screen can reuse the list it already read
    * @param obtainable how much of it the storage holds or could craft
-   * @param boxInStock whether the storage holds a box that could be filled, asked once per screen
    * @return whether the box line may stand on this row
    */
   static boolean boxPossible(
       UltsRuntime runtime,
       ItemStack template,
       List<UltsStoredView> stock,
-      long obtainable,
-      boolean boxInStock
+      long obtainable
   ) {
     if (!boxReachable(template, obtainable)) {
       return false;
     }
-    return boxInStock || runtime.craftable(Items.SHULKER_BOX.getDefaultInstance(), stock) > 0;
+    return runtime.canPack(template, stock);
   }
 
   /**

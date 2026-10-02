@@ -1,6 +1,9 @@
 package com.flwolfy.ults.data.state;
 
+import com.flwolfy.ults.UltsMod;
+
 import com.flwolfy.ults.crafting.UltsCraftPool;
+import com.flwolfy.ults.crafting.UltsCraftMath;
 import com.flwolfy.ults.data.config.UltsCraftingMode;
 import com.flwolfy.ults.display.UltsCreativeCatalog;
 import com.flwolfy.ults.input.UltsContainers;
@@ -14,6 +17,7 @@ import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 import net.minecraft.core.registries.Registries;
+import net.minecraft.core.BlockPos;
 import net.minecraft.resources.Identifier;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
@@ -21,7 +25,6 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.Container;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
-import org.jetbrains.annotations.Nullable;
 
 /**
  * Remote storage mode: the containers inside the bound areas are the storage.
@@ -37,6 +40,39 @@ public final class UltsRemoteStorage {
   private static final int SHULKER_SLOTS = 27;
 
   private UltsRemoteStorage() {}
+
+  /** Loaded containers and the world's item-spawn boundary, shared by reads, withdrawals and recovery. */
+  interface Access {
+    void forEach(Consumer<Container> visitor);
+    boolean drop(ItemStack stack);
+  }
+
+  private static Access access(MinecraftServer server, List<UltsBinding> bindings) {
+    return new Access() {
+      @Override public void forEach(Consumer<Container> visitor) {
+        forEachContainer(server, bindings, visitor);
+      }
+
+      @Override public boolean drop(ItemStack stack) {
+        for (UltsBinding binding : bindings) {
+          ServerLevel level = level(server, binding.dimension());
+          if (level == null || !level.getChunkSource().hasChunk(
+              binding.pos().getX() >> 4, binding.pos().getZ() >> 4)) {
+            continue;
+          }
+          var entity = new net.minecraft.world.entity.item.ItemEntity(
+              level, binding.pos().getX() + 0.5, binding.pos().getY() + 0.5,
+              binding.pos().getZ() + 0.5, stack.copy());
+          entity.setDefaultPickUpDelay();
+          if (level.addFreshEntity(entity) && level.getEntity(entity.getId()) != null) {
+            return true;
+          }
+          entity.discard();
+        }
+        return false;
+      }
+    };
+  }
 
   /** One kind of empty shulker box that packing may consume, in preference order. */
   public record Boxes(ItemStack template, long count) {}
@@ -66,9 +102,58 @@ public final class UltsRemoteStorage {
   }
 
   public static Snapshot snapshot(MinecraftServer server, List<UltsBinding> bindings) {
+    return snapshot(access(server, bindings));
+  }
+
+  /** Stable physical inventory identity, independent of a chest joining or splitting. */
+  public record Part(String dimension, BlockPos position) {}
+
+  /** A slice retains inventory provenance so merging overlapping bindings cannot duplicate items. */
+  public record ShardSnapshot(long generation, Map<Part, Snapshot> parts) {
+    public ShardSnapshot { parts = Map.copyOf(parts); }
+  }
+
+  public static ShardSnapshot snapshotShard(
+      MinecraftServer server, List<UltsBinding> bindings, long generation
+  ) {
+    Map<Part, Snapshot> parts = new HashMap<>();
+    for (UltsBinding binding : bindings) {
+      ServerLevel level = level(server, binding.dimension());
+      if (level == null || !level.hasChunk(binding.x() >> 4, binding.z() >> 4)) {
+        continue;
+      }
+      for (UltsContainers.InventoryPart inventory : UltsContainers.inventories(level, binding.pos())) {
+        BlockPos position = inventory.position();
+        Part part = new Part(binding.dimension(), position.immutable());
+        if (parts.containsKey(part)) continue;
+        Container container = inventory.inventory();
+        // Read the block entity's own slots, never the joined double-chest wrapper.
+        parts.put(part, snapshot(new Access() {
+          @Override public void forEach(Consumer<Container> visitor) { visitor.accept(container); }
+          @Override public boolean drop(ItemStack stack) { return false; }
+        }));
+      }
+    }
+    return new ShardSnapshot(generation, parts);
+  }
+
+  public static Snapshot mergeShards(List<ShardSnapshot> shards) {
+    Map<Part, ShardSnapshot> owners = new HashMap<>();
+    for (ShardSnapshot shard : shards) {
+      for (Part part : shard.parts().keySet()) {
+        owners.merge(part, shard, (first, second) ->
+            first.generation() >= second.generation() ? first : second);
+      }
+    }
+    List<Snapshot> unique = new ArrayList<>(owners.size());
+    owners.forEach((part, shard) -> unique.add(shard.parts().get(part)));
+    return merge(unique);
+  }
+
+  static Snapshot snapshot(Access access) {
     Map<Item, List<UltsStoredView>> grouped = new HashMap<>();
     Map<Item, List<Boxes>> boxes = new HashMap<>();
-    forEachContainer(server, bindings, container -> {
+    access.forEach(container -> {
       for (int slot = 0; slot < container.getContainerSize(); slot++) {
         ItemStack stack = container.getItem(slot);
         if (stack.isEmpty()) {
@@ -138,7 +223,7 @@ public final class UltsRemoteStorage {
       UltsStoredView existing = variants.get(index);
       if (UltsStackKinds.same(existing.template(), view.template())) {
         variants.set(index, new UltsStoredView(
-            existing.template(), existing.amount() + view.amount(), existing.special()));
+            existing.template(), UltsCraftMath.add(existing.amount(), view.amount()), existing.special()));
         return;
       }
     }
@@ -176,12 +261,20 @@ public final class UltsRemoteStorage {
   public static List<ItemStack> take(
       MinecraftServer server,
       List<UltsBinding> bindings,
+      UltsState recovery,
       ItemStack template,
       int quantity,
       boolean boxed,
       UltsCraftingMode mode
   ) {
-    Snapshot live = snapshot(server, bindings);
+    return take(access(server, bindings), recovery, template, quantity, boxed, mode);
+  }
+
+  static List<ItemStack> take(
+      Access access, UltsState recovery, ItemStack template,
+      int quantity, boolean boxed, UltsCraftingMode mode
+  ) {
+    Snapshot live = snapshot(access);
     UltsCraftPool before = UltsCraftPool.of(live.items());
     UltsWithdrawalPlan plan = UltsWithdrawalPlanner.plan(
         before.copy(), template, quantity, boxed, mode);
@@ -197,9 +290,9 @@ public final class UltsRemoteStorage {
       ItemStack kind = before.templateAt(index);
       long used = before.amountAt(index) - after.amount(kind);
       if (used > 0L && !extract(
-          server, bindings,
+          access,
           stack -> UltsStackKinds.same(stack, kind), used, removed)) {
-        restore(server, bindings, removed);
+        restoreOrKeep(access, recovery, removed);
         return List.of();
       }
     }
@@ -212,10 +305,15 @@ public final class UltsRemoteStorage {
         leftovers.addAll(UltsWithdrawalOutput.stacks(kind, extra));
       }
     }
-    if (!leftovers.isEmpty() && !bindings.isEmpty()) {
-      restore(server, bindings, leftovers);
-    }
+    restoreOrKeep(access, recovery, leftovers);
     return plan.outputs().stream().map(ItemStack::copy).toList();
+  }
+
+  private static void restoreOrKeep(Access access, UltsState recovery, List<ItemStack> stacks) {
+    if (!restore(access, stacks)) {
+      recovery.keepRemoteRecovery(stacks);
+      UltsMod.LOGGER.warn("UltStorage retained undelivered remote items in the saved recovery queue");
+    }
   }
 
   /**
@@ -229,19 +327,15 @@ public final class UltsRemoteStorage {
       List<UltsBinding> bindings,
       Consumer<Container> visitor
   ) {
-    Set<String> seen = new HashSet<>();
+    Set<Part> seen = new HashSet<>();
     for (UltsBinding binding : bindings) {
       ServerLevel level = level(server, binding.dimension());
       if (level == null) {
         continue;
       }
-      Container container = containerAt(level, binding.pos());
-      if (container == null
-          || !seen.add(binding.dimension() + "@"
-              + UltsContainers.identity(level, binding.pos()).asLong())) {
-        continue;
+      for (UltsContainers.InventoryPart part : UltsContainers.inventories(level, binding.pos())) {
+        if (seen.add(new Part(binding.dimension(), part.position()))) visitor.accept(part.inventory());
       }
-      visitor.accept(container);
     }
   }
 
@@ -251,8 +345,7 @@ public final class UltsRemoteStorage {
   }
 
   private static boolean extract(
-      MinecraftServer server,
-      List<UltsBinding> bindings,
+      Access access,
       Predicate<ItemStack> match,
       long requested,
       List<ItemStack> removed
@@ -261,7 +354,7 @@ public final class UltsRemoteStorage {
       return true;
     }
     long[] remaining = {requested};
-    forEachContainer(server, bindings, container -> {
+    access.forEach(container -> {
       if (remaining[0] <= 0) {
         return;
       }
@@ -282,50 +375,70 @@ public final class UltsRemoteStorage {
     return remaining[0] <= 0;
   }
 
-  private static void restore(
+  /**
+   * Puts stacks back into the containers the storage is made of, and drops whatever will not fit.
+   *
+   * <p>The drop goes to a container that is really there, rather than to whichever binding happens to be
+   * listed first: a storage spread over two dimensions would otherwise drop its leftovers in the wrong
+   * one, or nowhere at all.
+   *
+   * @param server the server
+   * @param bindings the containers the storage is made of
+   * @param stacks the stacks to put back
+   * @return whether every stack found a home
+   */
+  public static boolean restore(
       MinecraftServer server,
       List<UltsBinding> bindings,
       List<ItemStack> stacks
   ) {
+    return restore(access(server, bindings), stacks);
+  }
+
+  static boolean restore(Access access, List<ItemStack> stacks) {
+    boolean placed = true;
     for (ItemStack stack : stacks) {
       ItemStack pending = stack.copy();
-      forEachContainer(server, bindings, container -> {
+      access.forEach(container -> {
         if (!pending.isEmpty()) {
           insert(container, pending);
         }
       });
-      if (!pending.isEmpty()) {
-        ServerLevel level = level(server, bindings.getFirst().dimension());
-        if (level != null) {
-          net.minecraft.world.level.block.Block.popResource(
-              level, bindings.getFirst().pos(), pending);
-        }
+      if (!pending.isEmpty() && access.drop(pending.copy())) {
+        pending.setCount(0);
       }
+      // What could not be put anywhere is written back into the stack the caller handed in, so the caller
+      // can deal with exactly that remainder: the part that did land is already in a container, and
+      // depositing the whole stack would put it in two places at once.
+      stack.setCount(pending.getCount());
+      placed &= pending.isEmpty();
     }
+    return placed;
   }
 
   private static void insert(Container container, ItemStack pending) {
     for (int slot = 0; slot < container.getContainerSize() && !pending.isEmpty(); slot++) {
       ItemStack existing = container.getItem(slot);
-      if (existing.isEmpty()) {
-        container.setItem(slot, pending.copy());
-        pending.setCount(0);
-        container.setChanged();
+      if (!container.canPlaceItem(slot, pending)) {
         continue;
       }
       // Putting something back into a container is the game's own business, not the storage's: two
       // stacks only share a slot when every component agrees, whatever the stacking rule says about
       // what the storage treats as one kind of thing.
-      if (!ItemStack.isSameItemSameComponents(existing, pending)) {
+      if (!existing.isEmpty() && !ItemStack.isSameItemSameComponents(existing, pending)) {
         continue;
       }
-      int room = existing.getMaxStackSize() - existing.getCount();
+      int before = existing.getCount();
+      int room = container.getMaxStackSize(pending) - before;
       if (room <= 0) {
         continue;
       }
       int moved = Math.min(room, pending.getCount());
-      container.setItem(slot, existing.copyWithCount(existing.getCount() + moved));
-      pending.shrink(moved);
+      container.setItem(slot, pending.copyWithCount(before + moved));
+      ItemStack stored = container.getItem(slot);
+      int accepted = ItemStack.isSameItemSameComponents(stored, pending)
+          ? Math.max(0, Math.min(moved, stored.getCount() - before)) : 0;
+      pending.shrink(accepted);
       container.setChanged();
     }
   }
@@ -335,9 +448,11 @@ public final class UltsRemoteStorage {
         stack.getItem(), key -> new ArrayList<>());
     for (int index = 0; index < variants.size(); index++) {
       UltsStoredView view = variants.get(index);
-      if (ItemStack.isSameItemSameComponents(view.template(), stack)) {
+      // The configured stacking rule, the same one the void pool and the merge use: counted one way here
+      // and another way there, a listing could offer an amount that taking it cannot serve.
+      if (UltsStackKinds.same(view.template(), stack)) {
         variants.set(index, new UltsStoredView(
-            view.template(), view.amount() + stack.getCount(), view.special()));
+            view.template(), UltsCraftMath.add(view.amount(), stack.getCount()), view.special()));
         return;
       }
     }
@@ -350,8 +465,8 @@ public final class UltsRemoteStorage {
     List<Boxes> variants = boxes.computeIfAbsent(template.getItem(), key -> new ArrayList<>());
     for (int index = 0; index < variants.size(); index++) {
       Boxes entry = variants.get(index);
-      if (ItemStack.isSameItemSameComponents(entry.template(), template)) {
-        variants.set(index, new Boxes(entry.template(), entry.count() + count));
+      if (UltsStackKinds.same(entry.template(), template)) {
+        variants.set(index, new Boxes(entry.template(), UltsCraftMath.add(entry.count(), count)));
         return;
       }
     }

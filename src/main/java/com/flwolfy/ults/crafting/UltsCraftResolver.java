@@ -1,6 +1,7 @@
 package com.flwolfy.ults.crafting;
 
 import com.flwolfy.ults.data.config.UltsCraftingMode;
+import com.flwolfy.ults.data.state.UltsStoredView;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -8,9 +9,11 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.BooleanSupplier;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.item.crafting.Ingredient;
 import org.jetbrains.annotations.Nullable;
 
@@ -19,16 +22,17 @@ import org.jetbrains.annotations.Nullable;
  *
  * <p>A recipe is only used while everything it needs is either in the pile or can itself be made from
  * the pile, so a recipe may consume what another recipe makes. Recipes that need a crafting table or a
- * stonecutter are only usable while that station is stored; the station is never consumed.
+ * stonecutter require that station in the initial pile. The station check consumes nothing;
+ * a recipe may still explicitly name a station item as one of its ingredients.
  *
  * <p>The search is depth limited and never enters the same item twice on one path, so recipes that feed
  * each other (a block into ingots into a block) cannot make it loop.
  *
- * <h2>Why one answer used to take a whole minute</h2>
+ * <p>Materials and root recipes can be combined. Continuations make every allocation provisional:
+ * a later slot's failure can change an earlier choice. Recorded steps retain the concrete allocation
+ * so execution does not choose different materials after child runs have been reordered.
  *
- * <p>The search tries recipes in every order it can think of, so the number of piles it looks at grows
- * with the depth. Two things have to be true for that to stay affordable, and both are what this class
- * is built around:
+ * <p>Several independent optimizations reduce the number of states without changing feasibility:
  *
  * <ul>
  *   <li>Looking at a pile has to be cheap. Attempts used to copy the whole pile — thousands of stacks
@@ -36,11 +40,13 @@ import org.jetbrains.annotations.Nullable;
  *       marked and rolled back instead, and a slot of a recipe is counted by item rather than by stack.
  *   <li>Hopeless branches have to be recognised before they are walked. An item no chain of recipes
  *       can reach from this pile is dropped from every recipe slot before the search starts, which is
- *       what {@link #reach()} works out. That one pass replaces almost the whole search.
+ *       what {@link #reach()} works out. Returns are included in that reachability pass.
+ *   <li>Ingredient bounds group semantically identical slots. Exact rational resource potentials
+ *       also prove shortfalls when several conversion routes compete for the same raw materials.
  * </ul>
  *
  * <p>What is left is bounded twice over: by a number of steps and by a wall clock, so no pile can ever
- * hold a server tick hostage again. An answer that runs into either bound is reported as
+ * run without limit. An answer that runs into either bound is reported as
  * {@link #UNKNOWN} instead of being remembered, and is worked out again at a quieter moment.
  */
 public final class UltsCraftResolver {
@@ -51,9 +57,18 @@ public final class UltsCraftResolver {
   private static final int MAX_ANSWER_NODES = 20_000;
   /** A plan really has to happen, so it may look further than a screen that is only asking. */
   private static final int MAX_PLAN_NODES = 200_000;
+
+  /**
+   * How many recipes the reachability pass may look at before it stops marking.
+   *
+   * <p>That pass walks the whole catalogue up to {@link #MAX_DEPTH} times, and it runs before any question
+   * has a chance to say it has waited long enough. The budget is counted in recipes looked at rather than
+   * in time, so the same storage answers the same way on every machine.
+   */
+  private static final int MAX_REACH_NODES = 400_000;
   /** How long one answer may take at the very most, whatever else goes wrong. */
   private static final long ANSWER_BACKSTOP_NANOS = 100_000_000L;
-  /** The same ceiling for a plan, which is allowed to take longer but never a tick's worth. */
+  /** The same ceiling for a plan, which is allowed more work than a background listing. */
   private static final long PLAN_BACKSTOP_NANOS = 250_000_000L;
   /** How often the wall clock is read; it costs more than a search step does. */
   private static final int CLOCK_EVERY = 256;
@@ -91,6 +106,7 @@ public final class UltsCraftResolver {
 
   /** Every stack some chain of recipes can make from this pile, which is what the search may enter. */
   private final Set<String> reachable = new HashSet<>();
+  private final Map<String, ItemStack> reachableReturns = new HashMap<>();
   /** Slot to how much of it the untouched pile holds, worked out once per slot. */
   private final Map<Ingredient, Long> baseMatches = new HashMap<>();
   /** Slot to the stacks worth crafting for it, worked out once per slot. */
@@ -106,6 +122,18 @@ public final class UltsCraftResolver {
   private long deadline = Long.MAX_VALUE;
   /** Whether the last search stopped on its budget or its clock rather than on the pile. */
   private boolean ranOut;
+  /** Also bound Java call-stack depth when many small runs must be combined. */
+  private int frames;
+  private Set<Item> possibleReturns;
+  private Set<Item> returnDependent;
+  private final Map<Ingredient, List<Item>> slotKeys = new HashMap<>();
+  private @Nullable UltsCraftPotential potential;
+
+  /**
+   * Whether the reachability pass stopped at its budget, which makes everything this view says about what
+   * could be crafted a lower bound rather than the whole truth.
+   */
+  private boolean reachTruncated;
 
   // ==================== //
   // ===== Creation ===== //
@@ -172,6 +200,7 @@ public final class UltsCraftResolver {
    * @return whether at least one can be made
    */
   public boolean craftable(ItemStack template, long deadlineNanos) {
+    ranOut = false;
     if (template.isEmpty() || !mode.enabled() || pool.total() <= 0L) {
       return false;
     }
@@ -179,14 +208,14 @@ public final class UltsCraftResolver {
       // Only a box may be crafted as the item that is asked for; what a box needs may be anything.
       return false;
     }
-    ranOut = false;
     String wanted = key(template);
     Boolean remembered = mades.get(wanted);
     if (remembered != null) {
       return remembered;
     }
-    if (!reachable.contains(wanted)) {
-      // No chain of recipes leads here at all, so nothing has to be tried.
+    if (!reachable.contains(wanted) && !reachTruncated) {
+      // No chain of recipes leads here at all, so nothing has to be tried. A pass that stopped at its
+      // budget cannot say that, so the item is looked for properly instead of being written off.
       mades.put(wanted, false);
       return false;
     }
@@ -207,6 +236,11 @@ public final class UltsCraftResolver {
     return ranOut;
   }
 
+  /** Whether the reachability pass stopped at its budget, so this view knows less than it could. */
+  public boolean reachTruncated() {
+    return reachTruncated;
+  }
+
   /**
    * Tries one run of every route the item has, which is the same question as "could any be made".
    *
@@ -215,18 +249,11 @@ public final class UltsCraftResolver {
    * wants eight planks is not craftable out of three, however reachable planks are.
    */
   private boolean canMakeOne(ItemStack template, long deadlineNanos) {
+    potential = null;
     budget = MAX_ANSWER_NODES;
     ranOut = false;
     deadline = Math.min(deadlineNanos, System.nanoTime() + ANSWER_BACKSTOP_NANOS);
-    for (UltsCraftRecipe route : routes(template, true)) {
-      if (canRun(route, template, 1L)) {
-        return true;
-      }
-      if (ranOut) {
-        return false;
-      }
-    }
-    return false;
+    return canProduce(template, 1L);
   }
 
   /**
@@ -238,6 +265,7 @@ public final class UltsCraftResolver {
    *     deadline passed before the answer was worked out
    */
   public long capacity(ItemStack template, long deadlineNanos) {
+    ranOut = false;
     if (template.isEmpty() || !mode.enabled() || pool.total() <= 0L) {
       return 0L;
     }
@@ -259,6 +287,7 @@ public final class UltsCraftResolver {
       return 0L;
     }
     if (System.nanoTime() >= deadlineNanos) {
+      ranOut = true;
       return UNKNOWN;
     }
     long value = capacityOf(template, deadlineNanos);
@@ -298,6 +327,7 @@ public final class UltsCraftResolver {
    * @return the runs, or {@code null} when the pile cannot cover the amount
    */
   public @Nullable UltsCraftPlan plan(ItemStack template, long missing) {
+    ranOut = false;
     if (template.isEmpty() || missing <= 0L || !mode.enabled() || pool.total() <= 0L) {
       return null;
     }
@@ -307,29 +337,100 @@ public final class UltsCraftResolver {
     budget = MAX_PLAN_NODES;
     ranOut = false;
     deadline = System.nanoTime() + PLAN_BACKSTOP_NANOS;
+    potential = UltsCraftPotential.of(template, source.everything().stream().filter(this::station).toList(), deadline);
     // The same rule the capacity is worked out under: a plan may not consume the very item it is
     // making from the pile, or a recipe that runs both ways would be planned as a round trip that
     // makes nothing. A withdrawal has already kept what it promised, so this only closes the surplus.
     UltsCraftPool.Keep previous = pool.keepState();
-    pool.keep(template, pool.amount(template));
+    pool.reserve(template, pool.amount(template));
     try {
-      for (UltsCraftRecipe route : routes(template, true)) {
-        long operations = UltsCraftMath.divideRoundingUp(missing, route.outputCount());
-        int mark = pool.mark();
-        List<UltsCraftStep> steps = new ArrayList<>();
-        if (gather(route, operations, steps, 1, path(template))) {
-          // The pile the plan was worked out on is the pile that is kept.
-          return new UltsCraftPlan(steps, UltsCraftMath.multiply(operations, route.outputCount()));
-        }
-        pool.rollback(mark);
-        if (ranOut) {
-          return null;
-        }
+      int mark = pool.mark();
+      long original = pool.amount(template);
+      List<UltsCraftStep> steps = new ArrayList<>();
+      frames = 0;
+      if (produce(routes(template, true), missing, steps, 1, path(template), () -> true)) {
+        return new UltsCraftPlan(steps, pool.amount(template) - original);
       }
+      pool.rollback(mark);
       return null;
     } finally {
       pool.restoreKeep(previous);
     }
+  }
+
+  /** A final stock requirement, rather than an independently promised crafting run. */
+  public record Goal(ItemStack template, long amount) {
+    public Goal {
+      template = template.copyWithCount(1);
+      if (template.isEmpty() || amount < 0L) throw new IllegalArgumentException("Invalid crafting goal");
+    }
+  }
+
+  /**
+   * Plans all goals in one search. A later goal or final check can backtrack every earlier allocation.
+   * Existing and produced goal stock is reserved only up to the amount promised, so surplus outputs
+   * remain available to later goals. Failure restores the pile and all incoming reservations.
+   */
+  public @Nullable List<UltsCraftPlan> planTogether(
+      List<Goal> goals, BooleanSupplier finish, long deadlineNanos) {
+    budget = MAX_PLAN_NODES;
+    ranOut = false;
+    frames = 0;
+    deadline = Math.min(deadlineNanos, System.nanoTime() + PLAN_BACKSTOP_NANOS);
+    if (System.nanoTime() >= deadline) { ranOut = true; return null; }
+    UltsCraftPotential joint = UltsCraftPotential.of(goals.stream().map(Goal::template).toList(),
+        source.everything().stream().filter(this::station).toList(), deadline);
+    if (joint != null && !joint.sufficient(pool, goals)) return null;
+    int mark = pool.mark();
+    UltsCraftPool.Keep incoming = pool.keepState();
+    for (Goal goal : goals) pool.reserve(goal.template(), Math.min(goal.amount(), pool.amount(goal.template())));
+    List<UltsCraftPlan> plans = new ArrayList<>();
+    Map<String, UltsCraftPotential> bounds = new HashMap<>();
+    try {
+      if (goals(goals, 0, plans, bounds, finish)) return List.copyOf(plans);
+      pool.rollback(mark);
+      return null;
+    } finally { pool.restoreKeep(incoming); }
+  }
+
+  private boolean goals(List<Goal> goals, int index, List<UltsCraftPlan> plans,
+      Map<String, UltsCraftPotential> bounds, BooleanSupplier finish) {
+    if (System.nanoTime() >= deadline) { ranOut = true; return false; }
+    if (index == goals.size()) return finish.getAsBoolean();
+    Goal goal = goals.get(index);
+    ItemStack template = goal.template();
+    long original = pool.amount(template);
+    long missing = Math.max(0L, goal.amount() - original);
+    if (missing == 0L) {
+      plans.add(UltsCraftPlan.NONE);
+      if (goals(goals, index + 1, plans, bounds, finish)) return true;
+      plans.removeLast();
+      return false;
+    }
+    if (!mode.enabled() || (mode == UltsCraftingMode.SHULKER_BOXES_ONLY && !template.is(Items.SHULKER_BOX))) {
+      return false;
+    }
+    String wanted = key(template);
+    if (!reachable.contains(wanted) && !reachTruncated) return false;
+    if (!bounds.containsKey(wanted)) bounds.put(wanted,
+        UltsCraftPotential.of(template, source.everything().stream().filter(this::station).toList(), deadline));
+    UltsCraftPotential previousPotential = potential;
+    potential = bounds.get(wanted);
+    UltsCraftPool.Keep beforeGoal = pool.keepState();
+    List<UltsCraftStep> steps = new ArrayList<>();
+    try {
+      return produce(routes(template, true), missing, steps, 1, path(template), () -> {
+        UltsCraftPool.Keep branch = pool.keepState();
+        pool.restoreKeep(beforeGoal);
+        pool.reserve(template, goal.amount());
+        plans.add(new UltsCraftPlan(steps, pool.amount(template) - original));
+        try {
+          if (goals(goals, index + 1, plans, bounds, finish)) return true;
+          plans.removeLast();
+          return false;
+        } finally { pool.restoreKeep(branch); }
+      });
+    } finally { potential = previousPotential; }
   }
 
   // ============================== //
@@ -358,20 +459,48 @@ public final class UltsCraftResolver {
       return;
     }
     String[] produced = new String[count];
+    List<List<String>> returned = new ArrayList<>(count);
     for (int index = 0; index < count; index++) {
-      produced[index] = key(catalogued.get(index).result());
+      UltsCraftRecipe recipe = catalogued.get(index);
+      produced[index] = key(recipe.result());
+      List<String> returns = new ArrayList<>();
+      if (!recipe.needsStonecutter()) {
+        for (Ingredient slot : recipe.ingredients()) {
+          for (Item item : UltsIngredients.accepted(slot)) {
+            var remainder = item.getCraftingRemainder();
+            if (remainder != null) {
+              ItemStack template = remainder.create().copyWithCount(1);
+              String returnedKey = key(template);
+              returns.add(returnedKey);
+              reachableReturns.putIfAbsent(returnedKey, template);
+            }
+          }
+        }
+      }
+      returned.add(List.copyOf(returns));
     }
+    // This pass runs before any question is asked and has no clock of its own, so on a pack with a very
+    // large recipe catalogue it is the one place that could spend a whole tick without noticing. It is a
+    // filter rather than an answer — everything it marks is verified again when a recipe is really tried —
+    // so it stops at a budget and says that it stopped: fewer recipes are known to be in reach, and the
+    // view that was built on a truncated pass is treated as one that has not caught up yet.
+    int spent = 0;
     boolean grown = true;
     for (int round = 0; round <= MAX_DEPTH && grown; round++) {
       grown = false;
       Set<String> known = Set.copyOf(reachable);
       for (int index = 0; index < count; index++) {
+        if (++spent > MAX_REACH_NODES) {
+          reachTruncated = true;
+          return;
+        }
         UltsCraftRecipe recipe = catalogued.get(index);
-        if (reachable.contains(produced[index]) || !station(recipe) || !runnable(recipe, known)) {
+        if ((reachable.contains(produced[index]) && reachable.containsAll(returned.get(index)))
+            || !station(recipe) || !runnable(recipe, known)) {
           continue;
         }
-        reachable.add(produced[index]);
-        grown = true;
+        grown |= reachable.add(produced[index]);
+        grown |= reachable.addAll(returned.get(index));
       }
     }
   }
@@ -395,6 +524,9 @@ public final class UltsCraftResolver {
         return true;
       }
     }
+    for (var returned : reachableReturns.entrySet()) {
+      if (known.contains(returned.getKey()) && ingredient.test(returned.getValue())) return true;
+    }
     return false;
   }
 
@@ -417,168 +549,301 @@ public final class UltsCraftResolver {
     budget = MAX_ANSWER_NODES;
     ranOut = false;
     deadline = Math.min(deadlineNanos, System.nanoTime() + ANSWER_BACKSTOP_NANOS);
-    // What the pile already holds of the asked-for item is off limits, exactly as a withdrawal keeps
-    // the amount it promises to hand over. Without this a recipe that runs both ways is counted as
-    // production: nine gold ingots become a gold block, the block becomes nine ingots again, and the
-    // search reports nine craftable ingots that were in the pile all along. The question is how many
-    // can be *added*, and turning what is there into itself adds nothing.
+    potential = UltsCraftPotential.of(template, source.everything().stream().filter(this::station).toList(), deadline);
     UltsCraftPool.Keep previous = pool.keepState();
-    pool.keep(template, pool.amount(template));
+    pool.reserve(template, pool.amount(template));
     try {
-      long best = 0L;
-      for (UltsCraftRecipe route : routes(template, true)) {
-        long operations = maxOperations(route, template);
-        if (ranOut) {
-          return UNKNOWN;
-        }
-        best = Math.max(best, UltsCraftMath.multiply(operations, route.outputCount()));
+      long low = 0L, high = 1L;
+      // Expansion and mixed routes are tested by the same feasibility search as planning.
+      while (canProduce(template, high)) {
+        low = high;
+        if (high == Long.MAX_VALUE) return high;
+        high = UltsCraftMath.multiply(high, 2L);
       }
-      return best;
-    } finally {
-      pool.restoreKeep(previous);
-    }
+      if (ranOut) return UNKNOWN;
+      while (low < high - 1L) {
+        long middle = low + (high - low) / 2L;
+        if (canProduce(template, middle)) low = middle;
+        else high = middle;
+        if (ranOut) return UNKNOWN;
+      }
+      return low;
+    } finally { pool.restoreKeep(previous); }
   }
 
-  /**
-   * The most operations of one route that fit into the pile.
-   *
-   * <p>No run can use more items than the pile holds, so that total is the upper bound and the search
-   * doubles its way up to it instead of walking every amount.
-   */
-  private long maxOperations(UltsCraftRecipe route, ItemStack template) {
-    long total = pool.total();
-    if (total <= 0L || !canRun(route, template, 1L)) {
-      return 0L;
+  private boolean canProduce(ItemStack template, long need) {
+    int mark = pool.mark();
+    UltsCraftPool.Keep previous = pool.keepState();
+    pool.reserve(template, pool.amount(template));
+    frames = 0;
+    boolean result = produce(routes(template, true), need, null, 1, path(template), () -> true);
+    pool.rollback(mark);
+    pool.restoreKeep(previous);
+    return result;
+  }
+
+  @FunctionalInterface
+  private interface Continuation { boolean run(); }
+
+  /** Every allocation pays for work. Exhaustion is not a proof of infeasibility. */
+  private boolean visit() {
+    if (ranOut || budget-- <= 0 || frames >= 128
+        || ((budget & (CLOCK_EVERY - 1)) == 0 && System.nanoTime() >= deadline)) {
+      ranOut = true;
+      return false;
     }
-    long low = 1L;
-    long high = 2L;
-    while (high < total && canRun(route, template, high)) {
-      low = high;
-      high = Math.min(total, UltsCraftMath.multiply(high, 2L));
-      if (ranOut) {
-        return 0L;
+    return true;
+  }
+
+  /** Combine provisional batches and backtrack them when subsequent requirements fail. */
+  private boolean produce(List<UltsCraftRecipe> options, long need,
+      @Nullable List<UltsCraftStep> steps, int depth, Set<String> visiting, Continuation next) {
+    return produce(options, options.stream().map(UltsCraftRecipe::result).toList(), need,
+        steps, depth, visiting, next);
+  }
+
+  private long outputStock(List<ItemStack> goal) {
+    Set<String> counted = new HashSet<>();
+    long amount = 0L;
+    for (ItemStack template : goal) {
+      if (counted.add(com.flwolfy.ults.data.state.UltsStackKinds.of(template))) {
+        amount = UltsCraftMath.add(amount, pool.amount(template));
       }
     }
-    high = Math.min(high, total);
-    while (low < high) {
-      long middle = low + (high - low + 1L) / 2L;
-      if (canRun(route, template, middle)) {
-        low = middle;
-      } else {
-        high = middle - 1L;
+    return amount;
+  }
+
+  private boolean produce(List<UltsCraftRecipe> options, List<ItemStack> goal, long need,
+      @Nullable List<UltsCraftStep> steps, int depth, Set<String> visiting, Continuation next) {
+    if (need <= 0L) return next.run();
+    if (!visit()) return false;
+    if (depth == 1 && potential != null && potential.bound(pool) < need) return false;
+    if (upper(options, depth, visiting) < need) return false;
+    frames++;
+    try {
+      for (int routeIndex = 0; routeIndex < options.size(); routeIndex++) {
+        UltsCraftRecipe route = options.get(routeIndex);
+        Set<String> routePath = new HashSet<>(visiting);
+        routePath.add(key(route.result()));
+        long wanted = UltsCraftMath.divideRoundingUp(need, route.outputCount());
+        boolean reusable = options.stream().anyMatch(option -> returnDependent != null
+            && returnDependent.contains(option.result().getItem()));
+        // With no reusable returns, each route's quantity need only be chosen once.
+        List<UltsCraftRecipe> later = reusable ? options : options.subList(routeIndex + 1, options.size());
+        long bound = upper(List.of(route), depth, routePath);
+        if (bound >= UltsCraftMath.multiply(wanted, route.outputCount())
+            && batch(route, wanted, later, goal, need, steps, depth, routePath, visiting, next)) return true;
+        if (ranOut) return false;
+        long maximum = maxBatch(route, wanted, depth, routePath);
+        if (ranOut) return false;
+        if (maximum == wanted) maximum--;
+        for (long operations = maximum; operations > 0L; operations--) {
+          if (!visit()) return false;
+          if (batch(route, operations, later, goal, need, steps, depth, routePath, visiting, next)) return true;
+          if (ranOut) return false;
+        }
       }
-      if (ranOut) {
-        return 0L;
-      }
+      return false;
+    } finally { frames--; }
+  }
+
+  private boolean batch(UltsCraftRecipe route, long operations, List<UltsCraftRecipe> later,
+      List<ItemStack> goal, long need, @Nullable List<UltsCraftStep> steps, int depth,
+      Set<String> routePath, Set<String> visiting, Continuation next) {
+    long before = outputStock(goal);
+    return gather(route, operations, steps, depth, routePath, () -> {
+      UltsCraftPool.Keep previous = pool.keepState();
+      if (depth == 1) pool.reserve(route.result(), pool.amount(route.result()));
+      long gain = outputStock(goal) - before;
+      long remaining = gain >= 0L ? Math.max(0L, need - gain) : UltsCraftMath.add(need, -gain);
+      try { return produce(later, goal, remaining, steps, depth, visiting, next); }
+      finally { pool.restoreKeep(previous); }
+    });
+  }
+
+  private long maxBatch(UltsCraftRecipe route, long high, int depth, Set<String> visiting) {
+    if (probeBatch(route, high, depth, visiting)) return high;
+    long low = 0L;
+    while (!ranOut && low < high - 1L) {
+      long middle = low + (high - low) / 2L;
+      if (probeBatch(route, middle, depth, visiting)) low = middle;
+      else high = middle;
     }
     return low;
   }
 
-  private boolean canRun(UltsCraftRecipe route, ItemStack template, long operations) {
+  private boolean probeBatch(UltsCraftRecipe route, long operations, int depth, Set<String> visiting) {
+    if (upper(List.of(route), depth, visiting) < UltsCraftMath.multiply(operations, route.outputCount())) {
+      return false;
+    }
     int mark = pool.mark();
-    boolean ran = gather(route, operations, null, 1, path(template));
-    // A question never leaves the pile changed, whatever the answer was.
+    boolean result = gather(route, operations, null, depth, visiting, () -> true);
     pool.rollback(mark);
-    return ran;
+    return result;
   }
 
-  /**
-   * Runs one recipe often enough, crafting whatever the pile does not hold as it goes.
-   *
-   * @param steps where the runs are recorded, or {@code null} when only the answer is wanted
-   */
-  private boolean gather(
-      UltsCraftRecipe route,
-      long operations,
-      @Nullable List<UltsCraftStep> steps,
-      int depth,
-      Set<String> visiting
-  ) {
-    if (operations <= 0L || budget <= 0) {
-      return false;
-    }
-    if ((budget & (CLOCK_EVERY - 1)) == 0 && System.nanoTime() >= deadline) {
-      ranOut = true;
-      return false;
-    }
-    budget--;
-    for (Ingredient ingredient : order(route.ingredients(), operations)) {
-      // Taken as soon as it is there: the later slots of this run need what is left over, and the run
-      // itself would take it in the same way. What the slot has is handed back, so the pile is not
-      // counted twice for the same slot.
-      long available = provide(ingredient, operations, steps, depth, visiting);
-      if (available < operations) {
-        return false;
-      }
-      if (pool.takeMatching(ingredient, operations) < operations) {
-        return false;
-      }
-    }
-    if (steps != null) {
-      steps.add(new UltsCraftStep(route, operations));
-    }
-    pool.add(route.result(), UltsCraftMath.multiply(operations, route.outputCount()));
-    return true;
+  private boolean gather(UltsCraftRecipe route, long operations,
+      @Nullable List<UltsCraftStep> steps, int depth, Set<String> visiting, Continuation next) {
+    if (!visit()) return false;
+    int mark = pool.mark(), stepMark = steps == null ? 0 : steps.size();
+    boolean result = slots(route, order(route.ingredients(), operations), 0, operations,
+        new ArrayList<>(), steps, depth, visiting, next);
+    if (!result) { pool.rollback(mark); truncate(steps, stepMark); }
+    return result;
   }
 
-  /**
-   * Makes sure the pile holds enough for one ingredient slot, crafting runs for it when it does not.
-   *
-   * <p>Nothing is taken here: the run that needs the ingredient takes it when it is carried out, so
-   * the pile this plan was worked out on ends up exactly where running the plan leaves it.
-   *
-   * @return how much of the slot the pile holds once the runs are made, or {@code -1} when it cannot
-   *     be filled at all
-   */
-  private long provide(
-      Ingredient ingredient,
-      long need,
-      @Nullable List<UltsCraftStep> steps,
-      int depth,
-      Set<String> visiting
-  ) {
-    long available = pool.matches(ingredient);
-    if (available >= need) {
-      return available;
-    }
-    if (depth >= MAX_DEPTH || ranOut) {
-      return -1L;
-    }
-    for (ItemStack candidate : candidates(ingredient)) {
-      String candidateKey = key(candidate);
-      if (!visiting.add(candidateKey)) {
-        continue;
+  private boolean slots(UltsCraftRecipe route, List<Ingredient> ingredients, int index,
+      long operations, List<UltsStoredView> consumed, @Nullable List<UltsCraftStep> steps,
+      int depth, Set<String> visiting, Continuation next) {
+    if (index == ingredients.size()) {
+      List<UltsStoredView> returns = new ArrayList<>();
+      if (!route.needsStonecutter()) {
+        consumed.forEach(material -> UltsCraftStep.addRemainder(material, returns));
       }
-      try {
-        for (UltsCraftRecipe route : routes(candidate, false)) {
-          long shortfall = need - available;
-          if (shortfall <= 0L) {
-            return available;
-          }
-          long operations = UltsCraftMath.divideRoundingUp(shortfall, route.outputCount());
-          int mark = pool.mark();
-          List<UltsCraftStep> made = steps == null ? null : new ArrayList<>();
-          if (gather(route, operations, made, depth + 1, visiting)) {
-            if (steps != null) {
-              steps.addAll(made);
-            }
-            available = pool.matches(ingredient);
-          } else {
-            // A run that did not work out leaves the pile exactly as it found it.
-            pool.rollback(mark);
-          }
-          if (ranOut) {
-            return -1L;
-          }
-          if (available >= need) {
-            return available;
+      for (UltsStoredView returned : returns) pool.add(returned.template(), returned.amount());
+      UltsCraftStep step = new UltsCraftStep(route, operations, consumed);
+      pool.add(route.result(), step.output());
+      if (steps != null) steps.add(step);
+      return next.run();
+    }
+    Ingredient slot = ingredients.get(index);
+    return consume(slot, pool.matchingViews(slot), 0, operations, consumed, steps, depth, visiting, true,
+        () -> slots(route, ingredients, index + 1, operations, consumed, steps, depth, visiting, next));
+  }
+
+  /** Reserve concrete materials; later failures can change a slot's allocation or recipe. */
+  private boolean consume(Ingredient slot, List<UltsStoredView> held, int index, long need,
+      List<UltsStoredView> consumed, @Nullable List<UltsCraftStep> steps,
+      int depth, Set<String> visiting, boolean allowCraft, Continuation next) {
+    if (need <= 0L) return next.run();
+    if (!visit()) return false;
+    if (index == held.size()) {
+      if (!allowCraft || depth >= MAX_DEPTH) return false;
+      List<UltsCraftRecipe> options = new ArrayList<>();
+      for (ItemStack candidate : candidates(slot)) {
+        if (!visiting.contains(key(candidate))) {
+          for (UltsCraftRecipe route : routes(candidate, false)) {
+            if (!options.contains(route)) options.add(route);
           }
         }
-      } finally {
-        visiting.remove(candidateKey);
+      }
+      return produce(options, need, steps, depth + 1, visiting,
+          () -> consume(slot, pool.matchingViews(slot), 0, need, consumed, steps, depth, visiting, false, next));
+    }
+    UltsStoredView material = held.get(index);
+    long maximum = Math.min(need, material.amount()), minimum = 0L;
+    if (!allowCraft || candidates(slot).isEmpty() || depth >= MAX_DEPTH) {
+      long rest = 0L;
+      for (int other = index + 1; other < held.size(); other++) {
+        rest = UltsCraftMath.add(rest, held.get(other).amount());
+      }
+      minimum = Math.max(0L, need - rest);
+    }
+    for (long amount = maximum; amount >= minimum; amount--) {
+      if (!visit()) return false;
+      int mark = pool.mark(), stepMark = steps == null ? 0 : steps.size(), materialMark = consumed.size();
+      if (amount == 0L || pool.take(material.template(), amount) == amount) {
+        if (amount > 0L) consumed.add(new UltsStoredView(material.template(), amount, false));
+        if (consume(slot, held, index + 1, need - amount, consumed, steps, depth, visiting, allowCraft, next)) {
+          return true;
+        }
+      }
+      pool.rollback(mark);
+      truncate(steps, stepMark);
+      consumed.subList(materialMark, consumed.size()).clear();
+      if (ranOut || amount == 0L) return false;
+    }
+    return false;
+  }
+
+  private static void truncate(@Nullable List<UltsCraftStep> steps, int size) {
+    if (steps != null) steps.subList(size, steps.size()).clear();
+  }
+
+  /** Ignore competition between different inputs: only proven shortfalls can be pruned.
+   * Identical input costs share a bound. Memoization keeps wide graphs polynomial in depth. */
+  private long upper(List<UltsCraftRecipe> options, int depth, Set<String> visiting) {
+    return upper(options, depth, new HashMap<>());
+  }
+
+  private record BoundKey(List<Item> slot, int depth) {}
+
+  private List<Item> slotKey(Ingredient slot) {
+    return slotKeys.computeIfAbsent(slot, ingredient -> UltsIngredients.accepted(ingredient).stream()
+        .sorted(Comparator.comparingInt(UltsIngredients::itemId)).toList());
+  }
+
+  private record Cost(int output, Map<List<Item>, Ingredient> slots) {}
+
+  private long upper(List<UltsCraftRecipe> options, int depth, Map<BoundKey, Long> known) {
+    if (!visit()) return Long.MAX_VALUE;
+    Map<Map<List<Item>, Integer>, Cost> costs = new HashMap<>();
+    for (UltsCraftRecipe route : options) {
+      Map<List<Item>, Integer> counts = new HashMap<>();
+      Map<List<Item>, Ingredient> slots = new HashMap<>();
+      for (Ingredient slot : route.ingredients()) {
+        List<Item> key = slotKey(slot);
+        counts.merge(key, 1, Integer::sum);
+        slots.put(key, slot);
+      }
+      Cost existing = costs.get(counts);
+      if (existing == null || existing.output() < route.outputCount()) {
+        costs.put(Map.copyOf(counts), new Cost(route.outputCount(), slots));
       }
     }
-    return -1L;
+    long total = 0L;
+    for (var cost : costs.entrySet()) {
+      long operations = Long.MAX_VALUE;
+      for (var entry : cost.getKey().entrySet()) {
+        long available = upper(cost.getValue().slots().get(entry.getKey()), depth, known);
+        operations = Math.min(operations,
+            available == Long.MAX_VALUE ? available : available / entry.getValue());
+      }
+      total = UltsCraftMath.add(total, UltsCraftMath.multiply(operations, cost.getValue().output()));
+    }
+    return total;
+  }
+
+  private long upper(Ingredient slot, int depth, Map<BoundKey, Long> known) {
+    BoundKey key = new BoundKey(slotKey(slot), depth);
+    Long remembered = known.get(key);
+    if (remembered != null) return remembered;
+    if (possibleReturns == null) {
+      possibleReturns = new HashSet<>();
+      Map<Item, Set<Item>> consumers = new HashMap<>();
+      for (UltsCraftRecipe route : source.everything()) {
+        for (Ingredient ingredient : route.ingredients()) {
+          for (Item item : UltsIngredients.accepted(ingredient)) {
+            consumers.computeIfAbsent(item, ignored -> new HashSet<>()).add(route.result().getItem());
+            var returned = item.getCraftingRemainder();
+            if (!route.needsStonecutter() && returned != null) possibleReturns.add(returned.create().getItem());
+          }
+        }
+      }
+      returnDependent = new HashSet<>(possibleReturns);
+      var pending = new java.util.ArrayDeque<>(possibleReturns);
+      while (!pending.isEmpty()) {
+        for (Item output : consumers.getOrDefault(pending.remove(), Set.of())) {
+          if (returnDependent.add(output)) pending.add(output);
+        }
+      }
+    }
+    for (Item returned : possibleReturns) {
+      if (UltsIngredients.accepts(slot, returned)) return Long.MAX_VALUE;
+    }
+    long held = pool.matches(slot), value = held;
+    if (depth < MAX_DEPTH) {
+      List<UltsCraftRecipe> options = new ArrayList<>();
+      // Cycles are relaxed here, not pruned: removing them could understate this upper bound.
+      for (ItemStack candidate : candidates(slot)) {
+        for (UltsCraftRecipe route : routes(candidate, false)) {
+          if (!options.contains(route)) options.add(route);
+        }
+      }
+      value = UltsCraftMath.add(held, upper(options, depth + 1, known));
+    }
+    known.put(key, value);
+    return value;
   }
 
   /** The slots of a recipe, easiest to fill last. */
@@ -595,7 +860,7 @@ public final class UltsCraftResolver {
 
   private int rank(Ingredient ingredient, long operations) {
     if (pool.matches(ingredient) >= operations) {
-      // Already in the pile: filling this slot cannot be what makes the recipe fail.
+      // Prefer shortages first. Held slots still backtrack if their accepted materials overlap.
       return Integer.MAX_VALUE;
     }
     int candidates = candidates(ingredient).size();
@@ -636,7 +901,7 @@ public final class UltsCraftResolver {
     return fillable.computeIfAbsent(ingredient, slot -> {
       List<ItemStack> usable = new ArrayList<>();
       for (ItemStack candidate : source.candidates(slot)) {
-        if (reachable.contains(key(candidate))) {
+        if (reachTruncated || reachable.contains(key(candidate))) {
           usable.add(candidate);
         }
       }

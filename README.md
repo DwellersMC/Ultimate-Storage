@@ -251,6 +251,7 @@ With `input.crafting` enabled, a withdrawal that runs short is completed by craf
 - Routes are compared and the best one wins: whichever route produces the most from the current stock, and among those the one needing the fewest operations. A recipe that a stonecutter does in fewer operations is therefore preferred over the crafting table while a stonecutter is stored, and the crafting table takes over when no stonecutter is left.
 - Only the missing part is crafted. Withdrawing 64 of an item while 60 are stored and the recipe produces 4 per operation runs the recipe once and takes the remaining 60 from the stock. What a batch makes on the way and the request does not need, extra planks for example, stays in the storage instead of disappearing.
 - Recipes whose result or ingredients the game decides while it runs (dyeing, fireworks, banner and map copying, repairing, and the like) are not used.
+- Crafting-table runs return containers from the ingredients actually consumed: one cake returns three empty buckets. Planning and execution use the same rule, and a failed run rolls its containers back too.
 - **Special data items never show a craftable amount.** Such a row shows how many stacks are in its bag and when the newest of them arrived instead, because what could be made of an item says nothing about one particular named sword; a right click opens the bag. The crafting catalogue is not even asked about them.
 - The empty boxes of a full-box withdrawal are taken in the order **plain boxes in storage, then boxes crafted for the request, and only then the other colours**: a box that can be crafted is never passed over in favour of a coloured one, and when not all of them can be crafted, the colours cover what is left. The screen says how many stored boxes are used and how many are crafted before the confirm button is pressed.
 - The withdrawal screen lists what will be crafted before the confirm button is pressed.
@@ -439,6 +440,8 @@ A bag row's bag is opened by a **right click** on the row; while taking everythi
 
 ### Taking everything
 
+Both bags and ordinary items count physical stacks toward `takeAllStacks`: eight unstackable swords cost eight stacks even when they share one row. Bag rows can leave in batches, strictly limited to `takeAllRate` pieces per tick. Confirmation rereads rows and amounts together; items deposited afterwards stay for the next request.
+
 Shift and a right click asks to empty a stock out, and that is a question rather than a command: **three buttons centred in one row** — the way back at slot 3, the mode at slot 5, the confirmation at slot 7. It is a plain container and not the anvil screen the amount screen uses, because there is nothing to type here and a screen that cannot be typed into beats one whose field has to be kept empty. The way back is the **same red dye the anvil screens carry**, with its label on the first tooltip line, so leaving a screen looks the same wherever it is done.
 
 | Mode | What it takes |
@@ -458,7 +461,7 @@ The middle slot switches between the two and reports what each of them means: ho
   - or **another take-out took its place**, when the same player asks for another one.
 - **Opening a screen does not end a pour.** What it hands over is in the backpack and on the ground, where it stays: a player who opens a screen mid-pour keeps everything the pour already took, and it keeps pouring behind the screen. The notice comes in two steps, and the colours say which is which: `Taking out … ` in yellow when the pour starts, and then `Took everything: N out of the storage.` in green when it finishes, or `Taking out stopped: …` in red with the reason, naming how far it got.
 - **The confirmation is a barrier while it could not be served**, exactly as the amount screen's is: nothing stored leaves it saying so, and while `input.allowFullInventory` is off a backpack with no room blocks it with the same words the withdrawal screen uses — the two screens answer the same question the same way.
-- **What leaves is handed over the way a withdrawal is**: into the backpack first, and what does not fit is dropped on the ground when `input.allowFullInventory` is on. A stack the world refuses to drop is put back into the storage rather than lost with it, which is the one thing a full backpack must never do.
+- **What leaves is handed over the way a withdrawal is**: into the backpack first, and what does not fit is dropped on the ground when `input.allowFullInventory` is on. The backpack is filled by the mod's own hand-over rather than the game's, and a drop is only counted as done once the item is really in the level — a world that says it took the item and then never carries it, or that refuses it outright, leaves the stack going back into the storage rather than lost with it, which is the one thing a full backpack must never do. In remote mode a stack goes back into the containers it came from, and what none of them will take is dropped beside one of them; if even that is refused the stack is kept in the world data and the server log says so, because two silent ways to lose an item were two too many.
 - **The mode slot glints while it stands for the item itself**, and not while it stands for the crafting table or the box that fills in what is missing: the glint says "this is the thing you are taking", and a station or a container to pack it in is not that. The amount screen works the same way — its slot glints in item mode and goes dark in full-box mode.
 
 ---
@@ -472,6 +475,8 @@ Bound blocks are protected: breaking one requires sneaking. A normal break attem
 ---
 
 ## World Data
+
+Remote items that cannot be returned are saved in a separate `remoteRecovery` queue in the same `SavedData`. The queue preserves packed boxes and bypasses destructive filters and bag limits. Once a second it retries at most 36 normal stacks, rotating through the queue. Recovery resumes after loading the world and removes only what a container or the world actually accepted.
 
 Bindings and per-player view profiles are stored in the overworld `SavedData` of the world, so **each world has its own storage** and copying a world copies its storage. Nothing is written into container or player NBT. In `VOID` mode the stored items live in that same world data; in `REMOTE` mode they stay where they are, inside the bound containers. Every stored stack remembers when it was put in, which is what the special category lists, displays, sorts and trims by; a save written before that stamp existed still loads, its stacks simply count as the oldest. In `REMOTE` mode the containers themselves cannot tell two identical named swords apart, so a bag holds the variants it finds there, one entry per combination of components.
 
@@ -488,10 +493,20 @@ With **Cloth Config API** and **Mod Menu** installed on a client, every setting 
 ```bash
 ./gradlew build      # builds build/libs/ultimate-storage-<version>.jar
 ./gradlew test       # runs the unit tests
+./gradlew acceptanceTest # runs headless storage, crafting, delivery and recovery acceptance scenarios
+./gradlew -PserverAcceptance serverAcceptanceTest # runs isolated native-world acceptance with vanilla recipes
 ./gradlew runServer  # starts a development server
 ```
 
 Java 25 is required.
+
+`build` runs both suites. Acceptance covers container returns, failed remote surplus restoration through save/reload/retry, strict tick limits, stock changes between opening and confirming, failed-delivery conservation, and crafting cache reloads with unchanged contents. Tests use build directories and never read or modify a running game's save or operate its UI.
+
+Capacity, withdrawal planning and execution share the same inventory rules. Planning combines intermediate materials and root recipes, backtracks choices that starve later ingredients, and records concrete material allocations for replay. An independent forward-exploration oracle checks maximum production, every feasible quantity and failed-plan rollback for 27 small inventories. Further scenarios cover shared resources, overlapping slots, subsequent use of returned containers, packing reservations and large-count saturation. Depth and work budgets remain bounded; exhaustion reports an unknown result rather than caching zero production.
+
+The separate `serverAcceptanceTest` runs Minecraft 26.2 with its vanilla recipes: 64 logs produce 512 sticks, three log varieties produce 24, and planks plus bamboo produce five, with matching planned and executed inventories. World scenarios exercise redstone locks, blocked upstream paths, rotation and reconnection, joined/split/removed chest halves across shards, unloaded-chunk reads, and an actual filtered saved-data write followed by reading with the filter disabled. Each run creates a fresh world under `build/server-acceptance`, using an already accepted `run/eula.txt`. The probe is excluded from release jars. Results appear in `server-acceptance-results.txt` there; any failed assertion fails the Gradle task.
+
+Packing scenarios check joint allocation of box and contents: 216 logs and an existing blue box still yield 1,728 packed sticks after shells are added; 218 logs permit crafting the preferred plain box. Further regressions cover every physical inventory of configured multi-block containers, real partial inventory delivery and rejected entity drops, removing the binding when the other chest half is broken while preserving cancelled breaks, and quick withdrawals reading live stock. Headless tests also cover the last edit winning across configuration tabs, saturating inventory totals, and backpack capacity previews leaving their inputs unchanged.
 
 `build` also bakes the game's own item names into the jar for **every language the mod ships** — `en_us`, `zh_cn` and `zh_tw` at the moment, read from the files in `assets/ultimate-storage/lang` (task `generateItemNames`, output `build/generated/ultsItemNames`) — so that a search can be answered in the language the player's client draws items in. The words are taken from the Minecraft assets Loom has already downloaded, or from the game jar in the Loom cache for the languages the asset index does not carry; a build without them simply leaves the game's English names in place. See [Searching by name](#searching-by-name).
 

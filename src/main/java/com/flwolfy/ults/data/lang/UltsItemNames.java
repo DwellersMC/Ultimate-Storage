@@ -310,6 +310,10 @@ public final class UltsItemNames {
     if (LANGUAGES.size() >= MAX_LOCALES) {
       LANGUAGES.clear();
       NAMES.clear();
+      // The words of each language are read from every mod's files and kept, and the language is whatever
+      // the client says it speaks — so a client is free to name a new one until the files are read again.
+      // The default language stays, because every answer is built on it.
+      FILES.keySet().removeIf(kept -> !kept.equals(DEFAULT_LOCALE));
     }
     Map<String, String> language = Map.copyOf(merged);
     LANGUAGES.put(locale, language);

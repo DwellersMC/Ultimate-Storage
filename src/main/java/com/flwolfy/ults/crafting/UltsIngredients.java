@@ -1,5 +1,6 @@
 package com.flwolfy.ults.crafting;
 
+import com.flwolfy.ults.UltsMod;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -58,11 +59,23 @@ final class UltsIngredients {
     // only way to ask what a slot names. Nothing else here can be made cheap without it.
     return ACCEPTED.computeIfAbsent(ingredient, slot -> {
       LinkedHashSet<Item> items = new LinkedHashSet<>();
-      slot.items().forEach(holder -> {
-        if (holder.isBound()) {
-          items.add(holder.value());
-        }
-      });
+      try {
+        slot.items().forEach(holder -> {
+          if (holder.isBound()) {
+            items.add(holder.value());
+          }
+        });
+      } catch (RuntimeException refused) {
+        // Half an enumeration is worse than none: the recipe would be matched against a list that stops
+        // where the failure happened, so what was collected so far is thrown away with it.
+        items.clear();
+        // A slot that will not name what it holds is a slot this mod cannot reason about. Saying it holds
+        // nothing keeps the recipe out of the catalogue for this run instead of taking the server down:
+        // a modded or datapack ingredient is free to refuse to be listed, and one of those must not be
+        // able to crash a rebuild.
+        UltsMod.LOGGER.warn("UltStorage cannot list the items of an ingredient ({}); it is skipped",
+            refused.toString());
+      }
       return List.copyOf(items);
     });
   }

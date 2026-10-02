@@ -5,6 +5,9 @@ import com.flwolfy.ults.util.UltsBlockIds;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.HashSet;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -95,6 +98,20 @@ public final class UltsContainers {
     return List.copyOf(found);
   }
 
+  /** Physical slots shared by draining, live withdrawals and cached reads; no merged chest wrappers. */
+  public record InventoryPart(BlockPos position, Container inventory) {}
+
+  public static List<InventoryPart> inventories(ServerLevel level, BlockPos position) {
+    List<InventoryPart> inventories = new ArrayList<>();
+    Set<Container> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+    for (BlockPos part : parts(level, position)) {
+      if (loaded(level, part) && level.getBlockEntity(part) instanceof Container inventory && seen.add(inventory)) {
+        inventories.add(new InventoryPart(part.immutable(), inventory));
+      }
+    }
+    return List.copyOf(inventories);
+  }
+
   /** Follows the connected blocks of one large container, in every direction. */
   private static void grow(ServerLevel level, BlockPos origin, Set<BlockPos> found) {
     Block block = level.getBlockState(origin).getBlock();
@@ -117,6 +134,7 @@ public final class UltsContainers {
         }
         found.add(next);
         pending.add(next);
+        if (found.size() == MAX_PARTS) break;
       }
     }
   }
@@ -143,7 +161,15 @@ public final class UltsContainers {
     return configuredBlocks;
   }
 
-  private static boolean hasContainer(ServerLevel level, BlockPos position) {
+  /**
+   * Whether a position holds a loaded container, which is the cheapest question that says whether walking
+   * the parts of a large container could lead anywhere.
+   *
+   * @param level the level the position is in
+   * @param position the position being asked about
+   * @return whether a container is there
+   */
+  public static boolean hasContainer(ServerLevel level, BlockPos position) {
     return loaded(level, position) && level.getBlockEntity(position) instanceof Container;
   }
 
@@ -161,6 +187,9 @@ public final class UltsContainers {
   private static Container merged(ServerLevel level, BlockPos position) {
     BlockState state = level.getBlockState(position);
     if (!(state.getBlock() instanceof ChestBlock chest)) {
+      return null;
+    }
+    if (chestPart(level, position) && !loaded(level, partner(level, position))) {
       return null;
     }
     // The same lookup vanilla uses for hoppers, so both halves are one inventory.

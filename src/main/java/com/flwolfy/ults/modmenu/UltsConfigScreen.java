@@ -11,13 +11,15 @@ import com.flwolfy.ults.data.config.UltsStorageMode;
 import com.flwolfy.ults.data.lang.UltsLangManager;
 import com.flwolfy.ults.modmenu.entry.UltsIdListEntry;
 import com.flwolfy.ults.modmenu.entry.UltsSectionEntry;
+import com.flwolfy.ults.modmenu.entry.UltsSharedEntry;
+import com.flwolfy.ults.modmenu.model.UltsValueModel;
 import com.flwolfy.ults.modmenu.model.UltsIdEditorModel;
 import com.flwolfy.ults.util.UltsBlockIds;
 import com.flwolfy.ults.util.UltsItemIds;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
-import java.util.Objects;
+import java.util.function.Function;
 import me.shedaniel.clothconfig2.api.AbstractConfigListEntry;
 import me.shedaniel.clothconfig2.api.ConfigBuilder;
 import me.shedaniel.clothconfig2.api.ConfigCategory;
@@ -75,8 +77,7 @@ public final class UltsConfigScreen {
         value -> UltsItemIds.resolve(value).isPresent());
 
     // Every section is shown twice: once in its own tab and once inside the "all" overview. Scalar
-    // settings share a field, so the copy that was changed away from the loaded value wins; the id
-    // lists share a model instead, which keeps both copies in step while they are edited.
+    // settings and id lists each share their current value while retaining independent widget trees.
     List<AbstractConfigListEntry<?>> generalEntries = List.of(
         languageEntry(entries, language),
         itemVisibilityEntry(entries, itemVisibility),
@@ -182,46 +183,43 @@ public final class UltsConfigScreen {
       Field<String> field
   ) {
     String[] locales = UltsLangManager.getInstance().availableLocales().toArray(String[]::new);
-    AbstractConfigListEntry<String> entry = entries.startSelector(
-            Component.translatable(KEY + "language"), locales, field.initial())
+    return field.track(value -> entries.startSelector(
+            Component.translatable(KEY + "language"), locales, value)
         .setDefaultValue(UltsConfigData.DEFAULT.general().language())
         .setTooltip(Component.translatable(KEY + "language.tooltip"))
         .setNameProvider(locale -> Component.literal(
             UltsLangManager.getInstance().languageName(locale)))
-        .build();
-    return field.track(entry);
+        .build());
   }
 
   private static AbstractConfigListEntry<?> itemVisibilityEntry(
       ConfigEntryBuilder entries,
       Field<UltsItemVisibility> field
   ) {
-    AbstractConfigListEntry<UltsItemVisibility> entry = entries.startEnumSelector(
+    return field.track(value -> entries.startEnumSelector(
             Component.translatable(KEY + "item_visibility"),
             UltsItemVisibility.class,
-            field.initial())
+            value)
         .setDefaultValue(UltsConfigData.DEFAULT.general().itemVisibility())
         .setTooltip(Component.translatable(KEY + "item_visibility.tooltip"))
-        .setEnumNameProvider(value -> Component.translatable(
-            KEY + "item_visibility." + value.name().toLowerCase(Locale.ROOT)))
-        .build();
-    return field.track(entry);
+        .setEnumNameProvider(labelValue -> Component.translatable(
+            KEY + "item_visibility." + labelValue.name().toLowerCase(Locale.ROOT)))
+        .build());
   }
 
   private static AbstractConfigListEntry<?> storageModeEntry(
       ConfigEntryBuilder entries,
       Field<UltsStorageMode> field
   ) {
-    AbstractConfigListEntry<UltsStorageMode> entry = entries.startEnumSelector(
+    return field.track(value -> entries.startEnumSelector(
             Component.translatable(KEY + "storage_mode"),
             UltsStorageMode.class,
-            field.initial())
+            value)
         .setDefaultValue(UltsConfigData.DEFAULT.general().storageMode())
         .setTooltip(Component.translatable(KEY + "storage_mode.tooltip"))
-        .setEnumNameProvider(value -> Component.translatable(
-            KEY + "storage_mode." + value.name().toLowerCase(Locale.ROOT)))
-        .build();
-    return field.track(entry);
+        .setEnumNameProvider(labelValue -> Component.translatable(
+            KEY + "storage_mode." + labelValue.name().toLowerCase(Locale.ROOT)))
+        .build());
   }
 
   /** One permission level covers binding, deleting, the highlight and reloading. */
@@ -229,12 +227,11 @@ public final class UltsConfigScreen {
       ConfigEntryBuilder entries,
       Field<Integer> field
   ) {
-    AbstractConfigListEntry<Integer> entry = entries.startIntSlider(
-            Component.translatable(KEY + "permission"), field.initial(), 0, 4)
+    return field.track(value -> entries.startIntSlider(
+            Component.translatable(KEY + "permission"), value, 0, 4)
         .setDefaultValue(UltsConfigData.DEFAULT.input().permissionLevel())
         .setTooltip(Component.translatable(KEY + "permission.tooltip"))
-        .build();
-    return field.track(entry);
+        .build());
   }
 
   private static AbstractConfigListEntry<?> countEntry(
@@ -242,13 +239,12 @@ public final class UltsConfigScreen {
       Field<Integer> field,
       String key
   ) {
-    AbstractConfigListEntry<Integer> entry = entries.startIntField(
-            Component.translatable(KEY + key), field.initial())
-        .setDefaultValue(field.initial())
+    return field.track(value -> entries.startIntField(
+            Component.translatable(KEY + key), value)
+        .setDefaultValue(UltsConfigData.DEFAULT.input().maxBindings())
         .setMin(0)
         .setTooltip(Component.translatable(KEY + key + ".tooltip"))
-        .build();
-    return field.track(entry);
+        .build());
   }
 
   /** The drain interval is a tick count between 1 and 20. */
@@ -256,13 +252,12 @@ public final class UltsConfigScreen {
       ConfigEntryBuilder entries,
       Field<Integer> field
   ) {
-    AbstractConfigListEntry<Integer> entry = entries.startIntSlider(
-            Component.translatable(KEY + "drain_interval"), field.initial(),
+    return field.track(value -> entries.startIntSlider(
+            Component.translatable(KEY + "drain_interval"), value,
             UltsConfigData.MIN_DRAIN_INTERVAL, UltsConfigData.MAX_DRAIN_INTERVAL)
         .setDefaultValue(UltsConfigData.DEFAULT.input().drainInterval())
         .setTooltip(Component.translatable(KEY + "drain_interval.tooltip"))
-        .build();
-    return field.track(entry);
+        .build());
   }
 
   /** Automatic crafting is off, limited to shulker boxes, or open to every recipe. */
@@ -270,16 +265,15 @@ public final class UltsConfigScreen {
       ConfigEntryBuilder entries,
       Field<UltsCraftingMode> field
   ) {
-    AbstractConfigListEntry<UltsCraftingMode> entry = entries.startEnumSelector(
+    return field.track(value -> entries.startEnumSelector(
             Component.translatable(KEY + "crafting"),
             UltsCraftingMode.class,
-            field.initial())
+            value)
         .setDefaultValue(UltsConfigData.DEFAULT.input().crafting())
         .setTooltip(Component.translatable(KEY + "crafting.tooltip"))
-        .setEnumNameProvider(value -> Component.translatable(
-            KEY + "crafting." + value.name().toLowerCase(Locale.ROOT)))
-        .build();
-    return field.track(entry);
+        .setEnumNameProvider(labelValue -> Component.translatable(
+            KEY + "crafting." + labelValue.name().toLowerCase(Locale.ROOT)))
+        .build());
   }
 
   /** Whether a withdrawal may exceed the room left in the player's inventory. */
@@ -287,12 +281,11 @@ public final class UltsConfigScreen {
       ConfigEntryBuilder entries,
       Field<Boolean> field
   ) {
-    AbstractConfigListEntry<Boolean> entry = entries.startBooleanToggle(
-            Component.translatable(KEY + "allow_full_inventory"), field.initial())
+    return field.track(value -> entries.startBooleanToggle(
+            Component.translatable(KEY + "allow_full_inventory"), value)
         .setDefaultValue(UltsConfigData.DEFAULT.input().allowFullInventory())
         .setTooltip(Component.translatable(KEY + "allow_full_inventory.tooltip"))
-        .build();
-    return field.track(entry);
+        .build());
   }
 
   /**
@@ -305,12 +298,11 @@ public final class UltsConfigScreen {
       ConfigEntryBuilder entries,
       Field<Boolean> field
   ) {
-    AbstractConfigListEntry<Boolean> entry = entries.startBooleanToggle(
-            Component.translatable(KEY + "allow_take_all"), field.initial())
+    return field.track(value -> entries.startBooleanToggle(
+            Component.translatable(KEY + "allow_take_all"), value)
         .setDefaultValue(UltsConfigData.DEFAULT.input().allowTakeAll())
         .setTooltip(Component.translatable(KEY + "allow_take_all.tooltip"))
-        .build();
-    return field.track(entry);
+        .build());
   }
 
   /**
@@ -323,15 +315,14 @@ public final class UltsConfigScreen {
       ConfigEntryBuilder entries,
       Field<Integer> field
   ) {
-    AbstractConfigListEntry<Integer> entry = entries.startIntField(
-            Component.translatable(KEY + "take_all_stacks"), field.initial())
+    return field.track(value -> entries.startIntField(
+            Component.translatable(KEY + "take_all_stacks"), value)
         .setDefaultValue(UltsConfigData.DEFAULT.input().takeAllStacks())
         .setMin(1)
         .setMax(UltsConfigData.MAX_TAKE_ALL_STACKS)
         .setTooltip(Component.translatable(
             KEY + "take_all_stacks.tooltip", UltsConfigData.DEFAULT_TAKE_ALL_STACKS))
-        .build();
-    return field.track(entry);
+        .build());
   }
 
   /** How many items one take-everything hands over per tick while it runs. */
@@ -339,15 +330,14 @@ public final class UltsConfigScreen {
       ConfigEntryBuilder entries,
       Field<Integer> field
   ) {
-    AbstractConfigListEntry<Integer> entry = entries.startIntField(
-            Component.translatable(KEY + "take_all_rate"), field.initial())
+    return field.track(value -> entries.startIntField(
+            Component.translatable(KEY + "take_all_rate"), value)
         .setDefaultValue(UltsConfigData.DEFAULT.input().takeAllRate())
         .setMin(1)
         .setMax(UltsConfigData.MAX_TAKE_ALL_RATE)
         .setTooltip(Component.translatable(
             KEY + "take_all_rate.tooltip", UltsConfigData.DEFAULT_TAKE_ALL_RATE))
-        .build();
-    return field.track(entry);
+        .build());
   }
 
   /**
@@ -360,8 +350,8 @@ public final class UltsConfigScreen {
       ConfigEntryBuilder entries,
       Field<Integer> field
   ) {
-    AbstractConfigListEntry<Integer> entry = entries.startIntField(
-            Component.translatable(KEY + "special_bundle_slots"), field.initial())
+    return field.track(value -> entries.startIntField(
+            Component.translatable(KEY + "special_bundle_slots"), value)
         .setDefaultValue(UltsConfigData.DEFAULT.special().bundleSlots())
         .setMin(1)
         .setMax(UltsConfigData.MAX_BUNDLE_SLOTS)
@@ -370,8 +360,7 @@ public final class UltsConfigScreen {
             UltsConfigData.BUNDLE_PAGE_SIZE,
             UltsConfigData.DEFAULT_BUNDLE_SLOTS,
             UltsConfigData.pagesOf(UltsConfigData.DEFAULT_BUNDLE_SLOTS)))
-        .build();
-    return field.track(entry);
+        .build());
   }
 
   /** When two stacks of one item are the same kind of thing and pool into one row. */
@@ -379,16 +368,15 @@ public final class UltsConfigScreen {
       ConfigEntryBuilder entries,
       Field<UltsStackRule> field
   ) {
-    AbstractConfigListEntry<UltsStackRule> entry = entries.startEnumSelector(
+    return field.track(value -> entries.startEnumSelector(
             Component.translatable(KEY + "special_stack_rule"),
             UltsStackRule.class,
-            field.initial())
+            value)
         .setDefaultValue(UltsConfigData.DEFAULT.special().stackRule())
         .setTooltip(Component.translatable(KEY + "special_stack_rule.tooltip"))
-        .setEnumNameProvider(value -> Component.translatable(
-            KEY + "special_stack_rule.value." + value.name().toLowerCase(Locale.ROOT)))
-        .build();
-    return field.track(entry);
+        .setEnumNameProvider(labelValue -> Component.translatable(
+            KEY + "special_stack_rule.value." + labelValue.name().toLowerCase(Locale.ROOT)))
+        .build());
   }
 
   /** What the special filter does to the items it names. */
@@ -396,16 +384,15 @@ public final class UltsConfigScreen {
       ConfigEntryBuilder entries,
       Field<UltsSpecialFilter> field
   ) {
-    AbstractConfigListEntry<UltsSpecialFilter> entry = entries.startEnumSelector(
+    return field.track(value -> entries.startEnumSelector(
             Component.translatable(KEY + "special_filter_mode"),
             UltsSpecialFilter.class,
-            field.initial())
+            value)
         .setDefaultValue(UltsConfigData.DEFAULT.special().filterMode())
         .setTooltip(Component.translatable(KEY + "special_filter_mode.tooltip"))
-        .setEnumNameProvider(value -> Component.translatable(
-            KEY + "special_filter_mode." + value.name().toLowerCase(Locale.ROOT)))
-        .build();
-    return field.track(entry);
+        .setEnumNameProvider(labelValue -> Component.translatable(
+            KEY + "special_filter_mode." + labelValue.name().toLowerCase(Locale.ROOT)))
+        .build());
   }
 
   /** Item ids the special filter throws away. */
@@ -453,36 +440,20 @@ public final class UltsConfigScreen {
     );
   }
 
-  /**
-   * Shared value of one setting across every copy of its entry. The entry that was changed away from
-   * the loaded value wins, so editing the setting in any tab is applied exactly once.
-   */
+  /** A scalar model and separate widget factories keep the overview and tabs in step. */
   private static final class Field<T> {
+    private final UltsValueModel<T> model;
+    private final List<UltsSharedEntry<T>> copies = new ArrayList<>();
 
-    private final T initial;
-    private final List<AbstractConfigListEntry<T>> copies = new ArrayList<>();
-
-    private Field(T initial) {
-      this.initial = initial;
-    }
-
-    private T initial() {
-      return initial;
-    }
-
-    private AbstractConfigListEntry<?> track(AbstractConfigListEntry<T> entry) {
+    private Field(T initial) { model = new UltsValueModel<>(initial); }
+    private AbstractConfigListEntry<?> track(Function<T, AbstractConfigListEntry<T>> factory) {
+      var entry = new UltsSharedEntry<>(model, factory);
       copies.add(entry);
       return entry;
     }
-
     private T resolve() {
-      for (AbstractConfigListEntry<T> copy : copies) {
-        T value = copy.getValue();
-        if (!Objects.equals(value, initial)) {
-          return value;
-        }
-      }
-      return initial;
+      copies.forEach(UltsSharedEntry::getValue);
+      return model.value();
     }
   }
 }

@@ -1,5 +1,6 @@
 package com.flwolfy.ults.display;
 
+import com.flwolfy.ults.crafting.UltsCraftMath;
 import com.flwolfy.ults.UltsRuntime;
 import com.flwolfy.ults.data.config.UltsConfigData;
 import com.flwolfy.ults.data.config.UltsConfigManager;
@@ -164,7 +165,6 @@ public final class UltsStorageSGUI extends SimpleGui {
     Map<Item, List<UltsStoredView>> bags = bagRows(stored);
     // One question for the whole screen: whether there is a box to fill at all is a fact about the
     // storage, not about a row, so the rows do not each ask it again.
-    boolean boxInStock = !runtime.availableBox().isEmpty();
     List<UltsItemCategory> categories = visibleCategories(visibility, byItem, stored);
     if (category == null && !categories.isEmpty()) {
       category = categories.getFirst();
@@ -201,7 +201,7 @@ public final class UltsStorageSGUI extends SimpleGui {
     int lastItem = Math.min(firstItem + CONTENT_SLOTS.length, items.size());
     for (int index = firstItem; index < lastItem; index++) {
       setSlot(CONTENT_SLOTS[index - firstItem],
-          itemButton(items.get(index), stored, bags, boxInStock));
+          itemButton(items.get(index), stored, bags));
     }
     if (items.isEmpty()) {
       // Nothing to show: the middle of the item area says so instead of staying empty.
@@ -339,7 +339,7 @@ public final class UltsStorageSGUI extends SimpleGui {
     long amount = 0L;
     for (UltsStoredView view : byItem.getOrDefault(template.getItem(), List.of())) {
       if (ItemStack.isSameItemSameComponents(view.template(), template)) {
-        amount += view.amount();
+        amount = UltsCraftMath.add(amount, view.amount());
       }
     }
     return amount;
@@ -454,7 +454,7 @@ public final class UltsStorageSGUI extends SimpleGui {
           // The rule decides what counts as this row's stock, exactly as it decides what pools into one
           // stored kind: with the tooltip rule a sword that is merely more worn belongs to this row too.
           if (UltsStackKinds.same(view.template(), template)) {
-            amount += view.amount();
+            amount = UltsCraftMath.add(amount, view.amount());
           }
         }
         computed.add(new UltsStoredView(template, amount, false));
@@ -542,7 +542,7 @@ public final class UltsStorageSGUI extends SimpleGui {
     UltsStoredView newest = secondIsNewer ? second : first;
     UltsStoredView older = secondIsNewer ? first : second;
     return new UltsStoredView(
-        newest.template(), older.amount() + newest.amount(), true, newest.updatedAt());
+        newest.template(), UltsCraftMath.add(older.amount(), newest.amount()), true, newest.updatedAt());
   }
 
   private GuiElementBuilder categoryButton(UltsItemCategory value) {
@@ -575,8 +575,7 @@ public final class UltsStorageSGUI extends SimpleGui {
   private GuiElementBuilder itemButton(
       UltsStoredView view,
       List<UltsStoredView> stock,
-      Map<Item, List<UltsStoredView>> bags,
-      boolean boxInStock
+      Map<Item, List<UltsStoredView>> bags
   ) {
     ItemStack template = view.template();
     long amount = view.amount();
@@ -620,11 +619,11 @@ public final class UltsStorageSGUI extends SimpleGui {
     // A row can be taken from while the storage holds the item or could craft it, so an item that is
     // not stored but can be made right now is just as usable. The view answers this even while the
     // exact amount is still being worked out for a later tick.
-    long obtainable = amount + craftable;
+    long obtainable = UltsCraftMath.add(amount, craftable);
     if (obtainable > 0 || runtime.craftableNow(template, stock)) {
       boolean takeAll = runtime.allowTakeAll();
       UltsTakeHints.hints(builder, template, obtainable, "ults.gui.take.choose",
-          UltsTakeHints.boxPossible(runtime, template, stock, obtainable, boxInStock), takeAll);
+          UltsTakeHints.boxPossible(runtime, template, stock, obtainable), takeAll);
       builder.setCallback((slot, type, action, gui) -> {
         if (type == ClickType.MOUSE_LEFT) {
           takeOneStack(template);
@@ -656,14 +655,12 @@ public final class UltsStorageSGUI extends SimpleGui {
    * shows answers that may be a moment old, and a click must never hand over what is no longer there.
    */
   private void takeOneStack(ItemStack template) {
-    List<UltsStoredView> live = runtime.storedItems();
-    long obtainable = storedAmount(template, live) + runtime.craftableFresh(template, live);
-    if (obtainable < 1L) {
+    int quantity = runtime.stackQuantity(template);
+    if (quantity < 1) {
       UltsGuiSound.click(player);
       render();
       return;
     }
-    int quantity = (int) Math.min(obtainable, template.getMaxStackSize());
     List<ItemStack> wanted = UltsWithdrawalOutput.stacks(template, quantity);
     if (!runtime.allowFullInventory() && !UltsWithdrawSGUI.canFit(player, wanted)) {
       // In the chat, like the box refusals: a backpack with no room is a refusal the player has to be able
@@ -673,11 +670,14 @@ public final class UltsStorageSGUI extends SimpleGui {
     }
     List<ItemStack> outputs = runtime.takePlanned(template, quantity, false);
     if (outputs.isEmpty()) {
+      // The row was drawn a moment ago and the storage is asked as it stands: nothing left means somebody
+      // else took it, so the click says so instead of looking like a click that did not register.
+      UltsGuiChat.failure(player, "ults.withdraw.problem.gone");
       render();
       return;
     }
     UltsGuiSound.confirm(player);
-    UltsGuiGive.hand(player, runtime, outputs, runtime.allowFullInventory());
+    UltsGuiGive.handWithFeedback(player, runtime, outputs, runtime.allowFullInventory());
     render();
   }
 
@@ -703,11 +703,14 @@ public final class UltsStorageSGUI extends SimpleGui {
     }
     List<ItemStack> outputs = runtime.takePlanned(template, 1, true);
     if (outputs.isEmpty()) {
+      // The row was drawn a moment ago and the storage is asked as it stands: nothing left means somebody
+      // else took it, so the click says so instead of looking like a click that did not register.
+      UltsGuiChat.failure(player, "ults.withdraw.problem.gone");
       render();
       return;
     }
     UltsGuiSound.confirm(player);
-    UltsGuiGive.hand(player, runtime, outputs, runtime.allowFullInventory());
+    UltsGuiGive.handWithFeedback(player, runtime, outputs, runtime.allowFullInventory());
     render();
   }
 

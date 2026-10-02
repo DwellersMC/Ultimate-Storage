@@ -22,6 +22,22 @@ import org.junit.jupiter.api.Test;
 class UltsBackpackTest {
 
   @Test
+  @org.junit.jupiter.api.Tag("acceptance")
+  void fittingDoesNotTopUpTheOriginalBackpackOrRequestedStacks() {
+    UltsTestBootstrap.boot();
+    var stone = UltsTestBootstrap.stack(Items.STONE);
+    stone.set(DataComponents.MAX_STACK_SIZE, 64);
+    var slots = full(UltsTestBootstrap.stack(Items.DIRT));
+    var held = stone.copyWithCount(60);
+    slots.set(0, held);
+    var requested = stone.copyWithCount(4);
+    assertEquals(1, UltsBackpack.fitting(slots, List.of(requested)));
+    assertEquals(60, held.getCount());
+    assertEquals(60, slots.getFirst().getCount());
+    assertEquals(4, requested.getCount());
+  }
+
+  @Test
   void roomCountsEmptySlotsAndTheSpaceLeftInStacksOfTheThing() {
     UltsTestBootstrap.boot();
     ItemStack stone = UltsTestBootstrap.stack(Items.STONE);
@@ -60,6 +76,29 @@ class UltsBackpackTest {
     assertEquals(1, UltsBackpack.fitting(oneFree, stacks));
     assertEquals(0, UltsBackpack.fitting(full(stone), stacks));
     assertTrue(UltsBackpack.fitting(oneFree, List.of(stone.copyWithCount(1))) == 1);
+  }
+
+  @Test
+  void fillingAnswersWhatIsLeftOverRatherThanOnlyWhetherItFitted() {
+    UltsTestBootstrap.boot();
+    ItemStack stone = UltsTestBootstrap.stack(Items.STONE);
+
+    // The case that used to lose items: a completely full backpack, and a stack handed over anyway. The
+    // whole stack has to come back as leftover, because a caller hands over what the leftover says.
+    List<ItemStack> full = full(stone);
+    ItemStack leftover = UltsBackpack.fill(full, stone.copyWithCount(1));
+    assertEquals(1, leftover.getCount());
+    assertFalse(leftover.isEmpty());
+    for (int slot = 0; slot < UltsBackpack.SLOTS; slot++) {
+      assertFalse(full.get(slot).isEmpty());
+    }
+
+    // One free slot takes one piece and leaves nothing over.
+    List<ItemStack> oneFree = full(stone);
+    oneFree.set(5, ItemStack.EMPTY);
+    assertTrue(UltsBackpack.fill(oneFree, stone.copyWithCount(1)).isEmpty());
+    assertFalse(oneFree.get(5).isEmpty());
+    assertTrue(oneFree.get(4).is(stone.getItem()));
   }
 
   private static List<ItemStack> empty() {

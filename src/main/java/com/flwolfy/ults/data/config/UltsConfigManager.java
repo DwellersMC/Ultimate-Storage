@@ -19,6 +19,11 @@ public final class UltsConfigManager {
 
   private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
   private static final ReentrantReadWriteLock LOCK = new ReentrantReadWriteLock();
+  /**
+   * Held while the configuration file is read or written, and never while a value is handed out: two
+   * writers cannot interleave their file work, and a reader never waits for a disk.
+   */
+  private static final Object FILE_LOCK = new Object();
   private static final UltsConfigManager INSTANCE = new UltsConfigManager();
   private volatile UltsConfigData data;
 
@@ -51,47 +56,61 @@ public final class UltsConfigManager {
     }
   }
 
+  /**
+   * Reads the file for the editor, publishing nothing.
+   *
+   * <p>Reading is file work, and it happens under the file lock only, never under the lock the server
+   * thread reads its values through: that lock is taken for every stack the storage compares, so holding
+   * it across a disk read would stall a tick for as long as the disk takes.
+   */
   public UltsConfigData loadForEditing() {
-    LOCK.writeLock().lock();
-    try {
-      return readAndNormalize();
-    } catch (Exception exception) {
-      UltsMod.LOGGER.error("Failed to load Ults config for editing", exception);
-      return data;
-    } finally {
-      LOCK.writeLock().unlock();
+    synchronized (FILE_LOCK) {
+      try {
+        return readAndNormalize();
+      } catch (Exception exception) {
+        UltsMod.LOGGER.error("Failed to load Ults config for editing", exception);
+        return data();
+      }
     }
   }
 
   public boolean reload() {
-    LOCK.writeLock().lock();
-    try {
-      UltsConfigData loaded = readAndNormalize();
-      data = loaded;
-      UltsLangManager.getInstance().setLanguage(loaded.general().language());
-      return true;
-    } catch (Exception exception) {
-      UltsMod.LOGGER.error("Failed to reload Ults config; active values were preserved", exception);
-      return false;
-    } finally {
-      LOCK.writeLock().unlock();
+    UltsConfigData loaded;
+    synchronized (FILE_LOCK) {
+      try {
+        loaded = readAndNormalize();
+      } catch (Exception exception) {
+        UltsMod.LOGGER.error("Failed to reload Ults config; active values were preserved", exception);
+        return false;
+      }
     }
+    publishConfig(loaded);
+    return true;
   }
 
   public boolean update(UltsConfigData replacement) {
     if (replacement == null || !replacement.validate().isEmpty()) {
       return false;
     }
-    replacement = replacement.canonicalize();
+    UltsConfigData write = replacement.canonicalize();
+    synchronized (FILE_LOCK) {
+      try {
+        save(write);
+      } catch (Exception exception) {
+        UltsMod.LOGGER.error("Failed to update Ults config", exception);
+        return false;
+      }
+    }
+    publishConfig(write);
+    return true;
+  }
+
+  /** Makes a freshly read configuration the active one. The lock is held for the swap and nothing else. */
+  private void publishConfig(UltsConfigData loaded) {
     LOCK.writeLock().lock();
     try {
-      save(replacement);
-      data = replacement;
-      UltsLangManager.getInstance().setLanguage(replacement.general().language());
-      return true;
-    } catch (Exception exception) {
-      UltsMod.LOGGER.error("Failed to update Ults config", exception);
-      return false;
+      data = loaded;
+      UltsLangManager.getInstance().setLanguage(loaded.general().language());
     } finally {
       LOCK.writeLock().unlock();
     }
@@ -101,15 +120,14 @@ public final class UltsConfigManager {
     if (replacement == null || !replacement.validate().isEmpty()) {
       return false;
     }
-    LOCK.writeLock().lock();
-    try {
-      save(replacement.canonicalize());
-      return true;
-    } catch (Exception exception) {
-      UltsMod.LOGGER.error("Failed to save pending Ults config", exception);
-      return false;
-    } finally {
-      LOCK.writeLock().unlock();
+    synchronized (FILE_LOCK) {
+      try {
+        save(replacement.canonicalize());
+        return true;
+      } catch (Exception exception) {
+        UltsMod.LOGGER.error("Failed to save pending Ults config", exception);
+        return false;
+      }
     }
   }
 
@@ -117,12 +135,14 @@ public final class UltsConfigManager {
     try {
       return readAndNormalize();
     } catch (Exception exception) {
-      UltsMod.LOGGER.error("Failed to load Ults config; using defaults", exception);
-      try {
-        save(UltsConfigData.DEFAULT);
-      } catch (Exception saveException) {
-        exception.addSuppressed(saveException);
-      }
+      // The file is left alone. It is the only copy of the settings somebody wrote, and a single value the
+      // mod cannot read — a typo, a value from a version that has moved on — is no reason to write the
+      // defaults over everything else. The defaults are used for this run, and the log carries the reason.
+      // The path is deliberately not touched here: finding it can fail on its own, and a failure to report
+      // a failure would be the one thing worse than the failure.
+      UltsMod.LOGGER.error(
+          "Failed to read the Ults config; using defaults for this run and leaving the file as it is",
+          exception);
       return UltsConfigData.DEFAULT;
     }
   }
@@ -219,7 +239,13 @@ public final class UltsConfigManager {
       return;
     }
     try {
-      UltsItemVisibility.valueOf(value.getAsString());
+      // Read without regard to case, then written back in the one spelling the file uses: the value may
+      // have been typed by hand, and what this reader accepts has to be what the file then holds.
+      String canonical = UltsItemVisibility.valueOf(
+          value.getAsString().toUpperCase(java.util.Locale.ROOT)).name();
+      if (!canonical.equals(value.getAsString())) {
+        object.addProperty("itemVisibility", canonical);
+      }
     } catch (IllegalArgumentException retired) {
       String fallback = UltsConfigData.DEFAULT.general().itemVisibility().name();
       object.addProperty("itemVisibility", fallback);
@@ -240,7 +266,11 @@ public final class UltsConfigManager {
       return;
     }
     try {
-      UltsCraftingMode.valueOf(value.getAsString());
+      String canonical = UltsCraftingMode.valueOf(
+          value.getAsString().toUpperCase(java.util.Locale.ROOT)).name();
+      if (!canonical.equals(value.getAsString())) {
+        object.addProperty("crafting", canonical);
+      }
     } catch (IllegalArgumentException retired) {
       String fallback = UltsConfigData.DEFAULT.input().crafting().name();
       object.addProperty("crafting", fallback);
@@ -261,7 +291,11 @@ public final class UltsConfigManager {
       return;
     }
     try {
-      UltsSpecialFilter.valueOf(value.getAsString());
+      String canonical = UltsSpecialFilter.valueOf(
+          value.getAsString().toUpperCase(java.util.Locale.ROOT)).name();
+      if (!canonical.equals(value.getAsString())) {
+        object.addProperty("filterMode", canonical);
+      }
     } catch (IllegalArgumentException retired) {
       String fallback = UltsConfigData.DEFAULT.special().filterMode().name();
       object.addProperty("filterMode", fallback);

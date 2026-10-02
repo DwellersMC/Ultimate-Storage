@@ -1,6 +1,7 @@
 package com.flwolfy.ults.crafting;
 
 import com.flwolfy.ults.data.state.UltsBoxes;
+import com.flwolfy.ults.data.state.UltsStackKinds;
 import com.flwolfy.ults.data.state.UltsStoredView;
 import it.unimi.dsi.fastutil.ints.IntArrayList;
 import java.util.ArrayList;
@@ -35,9 +36,8 @@ public final class UltsCraftPool {
   private ItemStack[] templates;
   private long[] amounts;
   private int size;
-  /** The entry a withdrawal wants to hand over, and how much of it has to stay in the pile. */
-  private int keptIndex = -1;
-  private long keptAmount;
+  /** Promised contents and nested crafting targets can be reserved simultaneously. */
+  private final Map<Integer, Long> kept = new HashMap<>();
 
   /** How much of every item the pile holds, by registry id, and which of them it holds at all. */
   private final long[] heldAmounts;
@@ -77,8 +77,7 @@ public final class UltsCraftPool {
     for (int index = 0; index < size; index++) {
       copy.append(templates[index], amounts[index]);
     }
-    copy.keptIndex = keptIndex;
-    copy.keptAmount = keptAmount;
+    copy.kept.putAll(kept);
     return copy;
   }
 
@@ -94,15 +93,13 @@ public final class UltsCraftPool {
     Arrays.fill(heldMask, 0L);
     entriesByItem.clear();
     heldTotal = 0L;
-    keptIndex = -1;
-    keptAmount = 0L;
+    kept.clear();
     undone = 0;
     size = 0;
     for (int index = 0; index < other.size; index++) {
       append(other.templates[index], other.amounts[index]);
     }
-    keptIndex = other.keptIndex;
-    keptAmount = other.keptAmount;
+    kept.putAll(other.kept);
     undone = 0;
   }
 
@@ -155,7 +152,28 @@ public final class UltsCraftPool {
     return amounts[index];
   }
 
-  /** How much of exactly this stack is in the pile, components included. */
+  public long usableAmountAt(int index) { return usable(index); }
+
+  /** Entries a slot can consume, including the withdrawal's reservation. */
+  public List<UltsStoredView> matchingViews(Ingredient ingredient) {
+    int found = collect(UltsIngredients.itemMask(ingredient));
+    List<UltsStoredView> result = new ArrayList<>(found);
+    for (int position = 0; position < found; position++) {
+      int index = takeBuffer[position];
+      long amount = usable(index);
+      if (amount > 0L) {
+        result.add(new UltsStoredView(templates[index], amount, false));
+      }
+    }
+    return result;
+  }
+
+  /**
+   * How much of this kind of stack is in the pile.
+   *
+   * <p>Counted by the configured stacking rule rather than by components, because that is the rule the
+   * listings count by: a row that offers an amount has to be a row a withdrawal can find.
+   */
   public long amount(ItemStack template) {
     int index = indexOf(template);
     return index < 0 ? 0L : amounts[index];
@@ -167,7 +185,7 @@ public final class UltsCraftPool {
     return id >= 0 && id < heldAmounts.length && heldAmounts[id] > 0L;
   }
 
-  /** How many items the pile holds in total; no craft can use more items than this. */
+  /** How many items the pile holds in total; recipe outputs may expand this quantity. */
   public long total() {
     return heldTotal;
   }
@@ -191,11 +209,17 @@ public final class UltsCraftPool {
         total = UltsCraftMath.add(total, heldAmounts[item]);
       }
     }
-    if (keptIndex >= 0 && keptIndex < size && keptAmount > 0L
-        && UltsIngredients.accepts(ingredient, templates[keptIndex].getItem())) {
-      total -= Math.min(amounts[keptIndex], keptAmount);
-      if (total < 0L) {
-        total = 0L;
+    if (total == Long.MAX_VALUE && !kept.isEmpty()) {
+      total = 0L;
+      for (UltsStoredView entry : matchingViews(ingredient)) {
+        total = UltsCraftMath.add(total, entry.amount());
+      }
+      return total;
+    }
+    for (var entry : kept.entrySet()) {
+      int index = entry.getKey();
+      if (index < size && UltsIngredients.accepts(ingredient, templates[index].getItem())) {
+        total = Math.max(0L, total - Math.min(amounts[index], entry.getValue()));
       }
     }
     return total;
@@ -234,6 +258,13 @@ public final class UltsCraftPool {
 
   /** Removes up to {@code requested} items an ingredient accepts, in pile order. */
   public long takeMatching(Ingredient ingredient, long requested) {
+    return takeMatching(ingredient, requested, null);
+  }
+
+  /** Collects crafting containers from the items actually consumed; add them after all slots are paid. */
+  public long takeMatching(
+      Ingredient ingredient, long requested, @Nullable List<UltsStoredView> remainders
+  ) {
     if (requested <= 0L) {
       return 0L;
     }
@@ -246,6 +277,14 @@ public final class UltsCraftPool {
         continue;
       }
       long taken = Math.min(remaining, usable);
+      if (remainders != null) {
+        var remainder = templates[index].getItem().getCraftingRemainder();
+        if (remainder != null) {
+          ItemStack returned = remainder.create();
+          remainders.add(new UltsStoredView(
+              returned, UltsCraftMath.multiply(taken, returned.getCount()), false));
+        }
+      }
       record(index);
       setAmount(index, amounts[index] - taken);
       remaining -= taken;
@@ -264,23 +303,28 @@ public final class UltsCraftPool {
    * @param amount how much of the stored amount stays
    */
   public void keep(@Nullable ItemStack template, long amount) {
-    keptIndex = template == null || template.isEmpty() || amount <= 0L ? -1 : indexOf(template);
-    keptAmount = keptIndex < 0 ? 0L : amount;
+    kept.clear();
+    reserve(template, amount);
   }
 
-  /** The keep rule as it stands, so a caller can put it back after asking its own question. */
-  public Keep keepState() {
-    return new Keep(keptIndex, keptAmount);
+  /** Add a reservation without dropping another item promised by the withdrawal. */
+  public void reserve(@Nullable ItemStack template, long amount) {
+    if (template == null || template.isEmpty() || amount <= 0L) return;
+    int index = indexOf(template);
+    if (index >= 0) kept.merge(index, amount, Math::max);
   }
 
-  /** Puts back a keep rule taken by {@link #keepState()}. */
+  public Keep keepState() { return new Keep(Map.copyOf(kept)); }
+
   public void restoreKeep(Keep state) {
-    keptIndex = state.index();
-    keptAmount = state.amount();
+    kept.clear();
+    kept.putAll(state.amounts());
   }
 
-  /** A snapshot of the keep rule; see {@link #keepState()}. */
-  public record Keep(int index, long amount) {}
+  /** All current reservations; nested box and item plans must preserve each other's promises. */
+  public record Keep(Map<Integer, Long> amounts) {
+    public Keep { amounts = Map.copyOf(amounts); }
+  }
 
   /** How many empty boxes the pile holds. */
   public long packableAmount() {
@@ -411,7 +455,7 @@ public final class UltsCraftPool {
 
   /** How much of this entry crafting may take: what is kept for the withdrawal stays in the pile. */
   private long usable(int index) {
-    return index == keptIndex ? Math.max(0L, amounts[index] - keptAmount) : amounts[index];
+    return Math.max(0L, amounts[index] - kept.getOrDefault(index, 0L));
   }
 
   private int indexOf(ItemStack template) {
@@ -420,9 +464,13 @@ public final class UltsCraftPool {
     if (holders == null) {
       return -1;
     }
+    // The configured stacking rule, the same one that decides what pools into one row of a listing. A row
+    // the storage counts has to be a row a withdrawal can find: matching components exactly here while the
+    // listing matched by rule is how a row could offer an amount no click could take.
+    String kind = UltsStackKinds.of(template);
     for (int slot = 0; slot < holders.size(); slot++) {
       int index = holders.getInt(slot);
-      if (index < size && ItemStack.isSameItemSameComponents(templates[index], template)) {
+      if (index < size && kind.equals(UltsStackKinds.of(templates[index]))) {
         return index;
       }
     }
@@ -450,9 +498,14 @@ public final class UltsCraftPool {
       return;
     }
     amounts[index] = value;
-    heldTotal += value - previous;
-    if (heldTotal < 0L) {
+    long delta = value - previous;
+    if (heldTotal == Long.MAX_VALUE) {
       heldTotal = 0L;
+      for (int slot = 0; slot < Math.max(size, index + 1); slot++) {
+        heldTotal = UltsCraftMath.add(heldTotal, amounts[slot]);
+      }
+    } else {
+      heldTotal = delta >= 0L ? UltsCraftMath.add(heldTotal, delta) : heldTotal + delta;
     }
     int id = UltsIngredients.itemId(templates[index].getItem());
     if (id < 0 || id >= heldAmounts.length) {
@@ -461,7 +514,17 @@ public final class UltsCraftPool {
     // An item may be held by several entries at once, so only the item's own total says whether the
     // pile holds any of it at all.
     long wasHeld = heldAmounts[id];
-    long nowHeld = wasHeld + value - previous;
+    long nowHeld;
+    if (wasHeld == Long.MAX_VALUE) {
+      nowHeld = 0L;
+      for (int slot = 0; slot < Math.max(size, index + 1); slot++) {
+        if (templates[slot].getItem() == templates[index].getItem()) {
+          nowHeld = UltsCraftMath.add(nowHeld, amounts[slot]);
+        }
+      }
+    } else {
+      nowHeld = delta >= 0L ? UltsCraftMath.add(wasHeld, delta) : wasHeld + delta;
+    }
     if (wasHeld <= 0L && nowHeld > 0L) {
       heldMask[id >>> 6] |= 1L << (id & 63);
     } else if (wasHeld > 0L && nowHeld <= 0L) {
