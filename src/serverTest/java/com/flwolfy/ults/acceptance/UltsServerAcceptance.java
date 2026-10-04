@@ -135,6 +135,12 @@ public final class UltsServerAcceptance implements ModInitializer {
       case 20 -> {
         UltsNativeDelivery.check(server, runtime, this::check);
         UltsNativeBreak.check(server, runtime, this::check);
+        try {
+          UltsNativeQuantity.check(server, this::check);
+          com.flwolfy.ults.UltsNativeStability.check(server, this::check);
+          com.flwolfy.ults.UltsNativeLargeCraft.check(server, this::check);
+        }
+        catch (Exception error) { throw new IllegalStateException(error); }
       }
       case 41 -> {
         level.setBlock(downstream.below(), Blocks.REDSTONE_BLOCK.defaultBlockState(), 3);
@@ -246,7 +252,7 @@ public final class UltsServerAcceptance implements ModInitializer {
     try {
       check("configure independent multi-block inventory parts", manager.update(new UltsConfigData(old.general(),
           new UltsConfigData.Input(i.permissionLevel(), i.maxBindings(), 1, List.of("minecraft:dispenser"),
-              i.crafting(), i.allowFullInventory(), i.allowTakeAll(), i.takeAllStacks(), i.takeAllRate()), old.special())));
+              i.crafting(), i.allowFullInventory(), i.allowBulkWithdrawal(), i.bulkWithdrawalStacks(), i.withdrawalRate()), old.special())));
       var level = server.overworld();
       level.getChunk(1, 0);
       var root = new BlockPos(20, 64, 0);
@@ -313,7 +319,7 @@ public final class UltsServerAcceptance implements ModInitializer {
     if (!UltsConfigManager.getInstance().update(new UltsConfigData(
         new UltsConfigData.General("en_us", d.general().itemVisibility(), mode),
         new UltsConfigData.Input(i.permissionLevel(), i.maxBindings(), 20, i.multiBlockContainers(),
-            UltsCraftingMode.ALL, i.allowFullInventory(), i.allowTakeAll(), i.takeAllStacks(), i.takeAllRate()), d.special()))) {
+            UltsCraftingMode.ALL, i.allowFullInventory(), i.allowBulkWithdrawal(), i.bulkWithdrawalStacks(), i.withdrawalRate()), d.special()))) {
       throw new IllegalStateException("Isolated config update failed");
     }
     runtime.reload();

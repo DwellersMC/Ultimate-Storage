@@ -165,17 +165,77 @@ class UltsTakeAllBatchTest {
     assertEquals(List.of(1), h.requests);
   }
 
-  @Test void highRatesSplitWithdrawalsWithinThePlannerLimit() {
+  @Test void highRatesRespectBothTheRateAndPerTickOutputBudget() {
     var h = new Harness();
     var a = sword("A");
     h.state.deposit(a.copyWithCount(100));
     var batch = new UltsTakeAllBatch(List.of(a), List.of(100L));
     assertNull(h.tick(batch, 64, true));
-    assertEquals(64L, batch.taken());
-    assertEquals(List.of(36, 28), h.requests);
+    assertEquals(36L, batch.taken());
+    assertEquals(List.of(36), h.requests);
+    assertNull(h.tick(batch, 64, true));
+    assertEquals(72L, batch.taken());
     assertEquals(UltsTakeAllStream.Stop.DONE, h.tick(batch, 64, true));
     assertEquals(100L, h.pack() + h.ground);
     assertEquals(0L, h.stock());
+  }
+
+  @Test void aLargeExplicitRequestIsNotLimitedToOneBackpack() {
+    var h = new Harness();
+    var a = sword("large");
+    h.state.deposit(a.copyWithCount(1000));
+    var batch = new UltsTakeAllBatch(List.of(a), List.of(1000L));
+    for (int tick = 1; tick <= 100; tick++) {
+      var stop = h.tick(batch, 10, true);
+      assertEquals(tick * 10L, batch.taken());
+      assertEquals(tick == 100 ? UltsTakeAllStream.Stop.DONE : null, stop);
+    }
+    assertEquals(1000L, h.pack() + h.ground);
+    assertEquals(0L, h.stock());
+    assertTrue(h.requests.stream().allMatch(count -> count <= 10));
+  }
+
+  @Test void pendingPlanningPreservesTheEntireRequestForTheNextTick() {
+    var batch = new UltsTakeAllBatch(List.of(sword("pending")), List.of(5000L));
+    assertNull(batch.advance(64, true, List::of,
+        (template, count) -> com.flwolfy.ults.data.state.UltsWithdrawalResult.WAIT,
+        outputs -> { fail("pending planning must not deliver"); return 0L; }, Long.MAX_VALUE));
+    assertEquals(0L, batch.taken());
+    assertEquals(5000L, batch.remaining());
+    assertNull(batch.advance(64, true, List::of,
+        (template, count) -> { fail("expired budget must not withdraw"); return null; },
+        outputs -> 0L, System.nanoTime() - 1L));
+    assertEquals(5000L, batch.remaining());
+  }
+
+  @Test void fullBoxesUseTheSameDeliveryAccountingAndKeepTheirContents() {
+    var h = new Harness();
+    var contents = stack(Items.STONE);
+    contents.set(DataComponents.MAX_STACK_SIZE, 64);
+    h.state.deposit(contents.copyWithCount(3456));
+    h.state.deposit(stack(Items.SHULKER_BOX).copyWithCount(2));
+    var batch = new UltsTakeAllBatch(List.of(contents), List.of(2L), true);
+    java.util.function.BiFunction<ItemStack, Integer, List<ItemStack>> withdraw = (template, count) -> {
+      var plan = h.state.withdrawalPlan(template, count, true,
+          com.flwolfy.ults.data.config.UltsCraftingMode.DISABLED);
+      return h.state.takePlanned(plan, template, count, true);
+    };
+    var stop = batch.advance(1, false, () -> h.slots, withdraw, outputs ->
+        UltsGuiGive.deliver(outputs, output -> UltsBackpack.fill(h.slots, output),
+            output -> false, h.state::deposit, false).rejected());
+    assertNull(stop);
+    assertEquals(1L, batch.taken());
+    assertEquals(UltsTakeAllStream.Stop.DONE, batch.advance(1, false, () -> h.slots, withdraw,
+        outputs -> UltsGuiGive.deliver(outputs, output -> UltsBackpack.fill(h.slots, output),
+            output -> false, h.state::deposit, false).rejected()));
+    assertEquals(2L, batch.taken());
+    assertEquals(0L, com.flwolfy.ults.UltsRuntime.storedAmount(contents, h.state.items()));
+    for (int slot = 0; slot < 2; slot++) {
+      var box = h.slots.get(slot);
+      assertTrue(box.is(Items.SHULKER_BOX));
+      assertEquals(1728L, box.get(DataComponents.CONTAINER).allItemsCopyStream()
+          .mapToLong(ItemStack::getCount).sum());
+    }
   }
 
   @Test void freshBagSnapshotUpdatesRowsAndAmountsTogether() {

@@ -10,6 +10,7 @@ import com.flwolfy.ults.data.config.UltsStorageMode;
 import com.flwolfy.ults.data.lang.UltsItemNames;
 import com.flwolfy.ults.data.lang.UltsLangManager;
 import com.flwolfy.ults.data.state.UltsBinding;
+import com.flwolfy.ults.data.state.UltsBoxes;
 import com.flwolfy.ults.data.state.UltsRemoteStorage;
 import com.flwolfy.ults.data.state.UltsStackKinds;
 import com.flwolfy.ults.data.state.UltsState;
@@ -18,6 +19,7 @@ import com.flwolfy.ults.data.state.UltsStoredView;
 import com.flwolfy.ults.data.state.UltsSpecialFilters;
 import com.flwolfy.ults.data.state.UltsWithdrawalOutput;
 import com.flwolfy.ults.data.state.UltsWithdrawalPlan;
+import com.flwolfy.ults.data.state.UltsWithdrawalResult;
 import com.flwolfy.ults.display.UltsBagSGUI;
 import com.flwolfy.ults.display.UltsCreativeCatalog;
 import com.flwolfy.ults.display.UltsStorageSGUI;
@@ -31,6 +33,7 @@ import com.flwolfy.ults.util.UltsTextBuilder;
 import com.flwolfy.ults.visual.UltsHighlights;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -75,6 +78,8 @@ public final class UltsRuntime {
    * has to end even if some row never gets its turn, or a screen would redraw for ever.
    */
   private static final int MAX_CRAFTABLE_WAITS = 200;
+  /** Component variants can be numerous; retain only recently requested exact crafting answers. */
+  private static final int MAX_CRAFTING_ANSWERS = 20_000;
 
   /** How many slices the remote aggregate is computed in. */
   private static final int REMOTE_SHARDS = 8;
@@ -97,6 +102,16 @@ public final class UltsRuntime {
   private final MinecraftServer server;
   private final UltsState state;
   private final LongSupplier ticks;
+  private record StockKind(Item item, String kind, boolean special, boolean packable) {}
+  private final UltsStockStability<StockKind> stockStability = new UltsStockStability<>();
+  private final UltsStockStability<PackingKind> craftingStability = new UltsStockStability<>();
+  private List<UltsStoredView> lastStabilityStock;
+  private Map<PackingKind, Long> lastStabilityQuantities = Map.of();
+  private Map<StockKind, Long> lastKindQuantities = Map.of();
+  private Map<Item, Map<PackingKind, Long>> lastItemQuantities = Map.of();
+  private record CraftingMemo(Map<PackingKind, Long> inputs, UltsCraftingMode mode,
+      long amount, boolean noStation) {}
+  private final LinkedHashMap<PackingKind, CraftingMemo> craftingAnswers = new LinkedHashMap<>(64, 0.75f, true);
   private final UltsInputManager inputs;
   private final UltsHighlights highlights = new UltsHighlights();
   /** Stocks on their way out of the storage, a tick's worth at a time. */
@@ -218,6 +233,10 @@ public final class UltsRuntime {
 
   /** Catalogues and rules changed, so even unchanged contents need new answers and remote slices. */
   void invalidateCaches() {
+    craftingAnswers.clear();
+    craftingStability.clear();
+    stockStability.clear();
+    lastStabilityStock = null;
     packingAnswers.clear();
     packingMode = null;
     craftableView = null;
@@ -411,9 +430,9 @@ public final class UltsRuntime {
     return streams;
   }
 
-  /** How many items one take-everything hands over per tick while it runs. */
-  public int takeAllRate() {
-    return UltsConfigManager.getInstance().data().input().takeAllRate();
+  /** Maximum output units per tick for quantity and bulk withdrawal streams. */
+  public int withdrawalRate() {
+    return UltsConfigManager.getInstance().data().input().withdrawalRate();
   }
 
   /**
@@ -422,13 +441,13 @@ public final class UltsRuntime {
    * <p>Off means the offer is not there: no hint about it and no click that starts one, so nothing about
    * taking everything is shown.
    */
-  public boolean allowTakeAll() {
-    return UltsConfigManager.getInstance().data().input().allowTakeAll();
+  public boolean allowBulkWithdrawal() {
+    return UltsConfigManager.getInstance().data().input().allowBulkWithdrawal();
   }
 
   /** How many stacks one take-everything takes at most, which is what its screen promises. */
-  public int takeAllStacks() {
-    return UltsConfigManager.getInstance().data().input().takeAllStacks();
+  public int bulkWithdrawalStacks() {
+    return UltsConfigManager.getInstance().data().input().bulkWithdrawalStacks();
   }
 
   /** Remote storage mode keeps the bound containers themselves as the storage. */
@@ -442,21 +461,82 @@ public final class UltsRuntime {
    * inside a single tick.
    */
   public long contentRevision() {
-    if (!remote()) {
-      return state.revision();
-    }
-    watch();
-    return remoteRevision;
+    stockPending(storedItems());
+    craftingStability.settle(ticks.getAsLong(), stabilityQuietTicks());
+    return (remote() ? remoteRevision : state.revision()) + stockStability.revision()
+        + craftingStability.revision();
   }
 
   public List<UltsStoredView> storedItems() {
-    return remote() ? aggregate().items() : state.items();
+    List<UltsStoredView> stock = remote() ? aggregate().items() : state.items();
+    stockPending(stock);
+    return stock;
   }
 
   /** Clicks use loaded containers as they stand, bypassing the display's sharded cache. */
   public List<UltsStoredView> storedItemsFresh() {
-    return remote() ? UltsRemoteStorage.snapshot(server, state.bindings()).items() : state.items();
+    boolean remote = remote();
+    List<UltsStoredView> stock = remote
+        ? UltsRemoteStorage.snapshot(server, state.bindings()).items() : state.items();
+    // Never let an older display slice overwrite a live click's newly observed quantities.
+    if (remote && merged != null && !stockQuantities(stock).equals(stockQuantities(merged.items())))
+      invalidateRemote();
+    stockPending(stock);
+    return stock;
   }
+
+  /** Shared by players, but each stored kind has its own quiet window. */
+  public boolean stockPending(List<UltsStoredView> stock) {
+    stockQuantities(stock);
+    return stockStability.observe(lastKindQuantities, ticks.getAsLong(), stabilityQuietTicks());
+  }
+
+  public boolean stockPending(ItemStack template, List<UltsStoredView> stock) {
+    stockPending(stock);
+    String kind = UltsStackKinds.of(template);
+    return stockStability.pending(key -> key.item() == template.getItem() && key.kind().equals(kind));
+  }
+
+  /** Bag totals depend on the bag's item variants, including a variant just removed. */
+  public boolean stockPending(Item item, List<UltsStoredView> stock) {
+    stockPending(stock);
+    return stockStability.pending(key -> key.item() == item && key.special());
+  }
+
+  public boolean packagingPending(List<UltsStoredView> stock) {
+    stockPending(stock);
+    return stockStability.pending(StockKind::packable)
+        || craftingAmount(Items.SHULKER_BOX.getDefaultInstance(), stock).pending();
+  }
+
+  /** Maximum producer interval plus observation lag, with a strict one-tick safety margin. */
+  public long stabilityQuietTicks() {
+    long inputInterval = Math.max(1, UltsConfigManager.getInstance().data().input().drainInterval());
+    return Math.max(inputInterval, UltsTakeAllStreams.DELIVERY_INTERVAL_TICKS)
+        + (remote() ? (long) REMOTE_SHARDS * REMOTE_SHARD_TICKS : 0L) + 1L;
+  }
+
+  private Map<PackingKind, Long> stockQuantities(List<UltsStoredView> stock) {
+    if (stock == lastStabilityStock) return lastStabilityQuantities;
+    var quantities = new HashMap<PackingKind, Long>();
+    var kinds = new HashMap<StockKind, Long>();
+    for (var row : stock) if (row.amount() > 0L) {
+      quantities.merge(
+        new PackingKind(row.template().getItem(), row.template().getComponentsPatch()),
+        row.amount(), UltsCraftMath::add);
+      kinds.merge(new StockKind(row.template().getItem(), UltsStackKinds.of(row.template()),
+          row.special(), UltsBoxes.isPackable(row.template())),
+          row.amount(), UltsCraftMath::add);
+    }
+    lastStabilityStock = stock;
+    lastKindQuantities = Map.copyOf(kinds);
+    var indexed = new HashMap<Item, Map<PackingKind, Long>>();
+    quantities.forEach((key, amount) -> indexed.computeIfAbsent(key.item(), ignored -> new HashMap<>()).put(key, amount));
+    lastItemQuantities = indexed;
+    return lastStabilityQuantities = Map.copyOf(quantities);
+  }
+
+  public boolean stockPending() { return stockPending(storedItems()); }
 
   /** The configured crafting mode, which decides whether anything may be crafted at all. */
   public UltsCraftingMode craftingMode() {
@@ -492,6 +572,61 @@ public final class UltsRuntime {
    */
   public long craftable(ItemStack template, List<UltsStoredView> stock) {
     return craftable(template, stock, true);
+  }
+
+  public record CraftingAmount(long amount, boolean pending, boolean noStation) {}
+
+  /** Stored amounts never hide the additional craftable amount; timeout remains visible as pending. */
+  public CraftingAmount craftingAmount(ItemStack template, List<UltsStoredView> stock) {
+    return calculateCraftingAmount(template, stock);
+  }
+
+  /** Confirmation uses a live snapshot and the same per-kind waiting state as a listing. */
+  public CraftingAmount craftingAmountFresh(ItemStack template, List<UltsStoredView> stock) {
+    return calculateCraftingAmount(template, stock);
+  }
+
+  private CraftingAmount calculateCraftingAmount(ItemStack template, List<UltsStoredView> stock) {
+    if (stockPending(template, stock)) return new CraftingAmount(0L, true, false);
+    UltsCraftingMode mode = craftingMode();
+    if (!mode.enabled()) return new CraftingAmount(0L, false, false);
+    var key = new PackingKind(template.getItem(), template.getComponentsPatch());
+    var required = UltsCraftResolver.capacityInputs(template);
+    var signature = new HashMap<PackingKind, Long>();
+    stockQuantities(stock);
+    for (Item item : required) signature.putAll(lastItemQuantities.getOrDefault(item, Map.of()));
+    CraftingMemo known = craftingAnswers.get(key);
+    if (known != null && known.mode() == mode && known.inputs().equals(signature))
+      return measuredCrafting(key, known.amount(), known.noStation());
+    // A row never inherits another row's stale flag. Changed inputs require a current resolver;
+    // unchanged inputs retain their exact answer without spending another row's search budget.
+    UltsCraftResolver resolver = view(stock, true, true);
+    if (resolver == null) return new CraftingAmount(0L, false, false);
+    long amount = resolver.capacity(template, budget());
+    if (amount == UltsCraftResolver.UNKNOWN) {
+      defer();
+      return new CraftingAmount(0L, true, false);
+    }
+    boolean noStation = false;
+    if (amount == 0L) {
+      long withoutStation = looseView().capacity(template, budget());
+      if (withoutStation == UltsCraftResolver.UNKNOWN) {
+        defer();
+        return new CraftingAmount(0L, true, false);
+      }
+      noStation = withoutStation > 0L;
+    }
+    if (!craftingAnswers.containsKey(key) && craftingAnswers.size() >= MAX_CRAFTING_ANSWERS) {
+      var evicted = craftingAnswers.pollFirstEntry();
+      craftingStability.forget(evicted.getKey());
+    }
+    craftingAnswers.put(key, new CraftingMemo(Map.copyOf(signature), mode, amount, noStation));
+    return measuredCrafting(key, amount, noStation);
+  }
+
+  private CraftingAmount measuredCrafting(PackingKind key, long amount, boolean noStation) {
+    boolean pending = craftingStability.observe(key, amount, ticks.getAsLong(), stabilityQuietTicks());
+    return new CraftingAmount(amount, pending, noStation);
   }
 
   /**
@@ -588,6 +723,8 @@ public final class UltsRuntime {
 
   /** Notes that an answer is still owed, so a screen showing them may redraw on a later tick. */
   private void defer() {
+    // A page asks many rows in one tick. Count ticks, not rows, or a few redraws exhaust all retries.
+    if (craftableDeferred) return;
     craftableWaits++;
     craftableDeferred = craftableWaits < MAX_CRAFTABLE_WAITS;
   }
@@ -598,7 +735,8 @@ public final class UltsRuntime {
    * this is true, which is what keeps an amount from being left on screen after it stopped being true.
    */
   public boolean craftablePending() {
-    return craftableDeferred || craftableViewStale;
+    craftingStability.settle(ticks.getAsLong(), stabilityQuietTicks());
+    return stockPending() || craftingStability.pending() || craftableDeferred || craftableViewStale;
   }
 
   private long craftable(ItemStack template, List<UltsStoredView> stock, boolean requireStation) {
@@ -763,6 +901,57 @@ public final class UltsRuntime {
 
   public ItemStack availableBox() {
     return remote() ? UltsRemoteStorage.availableBox(aggregate()) : state.availableBox();
+  }
+
+  /** Streams share a tick deadline. An unfinished plan never consumes materials or signals shortage. */
+  public UltsWithdrawalResult takeBatch(ItemStack template, int quantity, boolean boxed,
+      UltsCraftingMode mode, long deadline) {
+    if (System.nanoTime() >= deadline) return UltsWithdrawalResult.WAIT;
+    if (!remote()) {
+      synchronized (state) {
+        UltsWithdrawalPlan plan = state.withdrawalPlan(template, quantity, boxed, mode, deadline);
+        if ("pending".equals(plan.problem())) return UltsWithdrawalResult.WAIT;
+        return new UltsWithdrawalResult(state.takePlanned(plan, template, quantity, boxed), false);
+      }
+    }
+    UltsWithdrawalResult result = UltsRemoteStorage.take(
+        server, state.bindings(), state, template, quantity, boxed, mode, deadline);
+    if (!result.outputs().isEmpty()) invalidateRemote();
+    return result;
+  }
+
+  /** A concurrent withdrawal may leave less than the requested batch, including craftable pieces. */
+  public UltsWithdrawalResult takeBatchUpTo(ItemStack template, int quantity, boolean boxed,
+      UltsCraftingMode mode, long deadline) {
+    UltsWithdrawalResult result = takeBatch(template, quantity, boxed, mode, deadline);
+    if (result.pending() || !result.outputs().isEmpty() || boxed || quantity <= 1) return result;
+    List<UltsStoredView> stock = storedItemsFresh();
+    long held = storedAmount(template, stock);
+    if (!mode.enabled()) return held <= 0L ? result : takeBatch(template,
+        (int) Math.min(quantity, held), false, mode, deadline);
+    UltsCraftPool before = UltsCraftPool.of(stock);
+    int low = (int) Math.min(quantity - 1L, held), high = quantity;
+    while (low < high - 1) {
+      int middle = low + (high - low) / 2;
+      UltsWithdrawalPlan probe = UltsWithdrawalPlanner.plan(
+          before.copy(), template, middle, false, mode, deadline);
+      if ("pending".equals(probe.problem())) return UltsWithdrawalResult.WAIT;
+      if (probe.available()) low = middle; else high = middle;
+    }
+    return low == 0 ? result : takeBatch(template, low, false, mode, deadline);
+  }
+
+  /** A quantity-menu preview validates one batch, never materializes an entire large request. */
+  public UltsWithdrawalPlan batchPreview(ItemStack template, int quantity, boolean boxed,
+      List<UltsStoredView> stock) {
+    return UltsWithdrawalPlanner.plan(UltsCraftPool.of(stock), template, quantity, boxed,
+        craftingMode(), budget());
+  }
+
+  public com.flwolfy.ults.data.state.UltsWithdrawalAssessment assessRequest(ItemStack template,
+      long quantity, boolean boxed, List<UltsStoredView> stock) {
+    return UltsWithdrawalPlanner.assess(UltsCraftPool.of(stock), template, quantity, boxed,
+        craftingMode(), budget());
   }
 
   /** Marks that a screen is looking at the aggregate, so the slices keep being refreshed. */

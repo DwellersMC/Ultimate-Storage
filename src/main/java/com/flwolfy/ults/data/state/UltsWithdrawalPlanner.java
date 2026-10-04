@@ -26,7 +26,7 @@ public final class UltsWithdrawalPlanner {
 
   /** How many slots one shulker box holds. */
   private static final int SHULKER_SLOTS = 27;
-  /** More result stacks than this do not fit into a player inventory. */
+  /** Per-transaction output work limit; a streamed request may contain arbitrarily many batches. */
   public static final int MAX_OUTPUT_STACKS = 36;
 
   private UltsWithdrawalPlanner() {}
@@ -75,45 +75,78 @@ public final class UltsWithdrawalPlanner {
     if (outputCount > MAX_OUTPUT_STACKS) {
       return unavailable("too_large", itemAvailable, required, boxAvailable, boxRequired);
     }
+    // Stored loose batches require no recipe search, even while automatic crafting is enabled.
+    if (!boxed && itemAvailable >= required) {
+      return new UltsWithdrawalPlan(true, "", itemAvailable, required, boxAvailable, 0,
+          0L, 0L, UltsWithdrawalOutput.looseStacks(template, quantity), 0L, List.of());
+    }
+    if (boxed && itemAvailable >= required && plainAvailable >= boxRequired) {
+      return new UltsWithdrawalPlan(true, "", itemAvailable, required, boxAvailable, boxRequired,
+          boxRequired, 0L, packedBoxes(pool, template, boxRequired), 0L, List.of());
+    }
 
-    int mark = pool.mark();
-    UltsCraftPool.Keep incoming = pool.keepState();
     List<UltsStoredView> originalBoxes = new ArrayList<>(pool.packableViews(true));
     originalBoxes.addAll(pool.packableViews(false));
+    Allocation allocation = allocate(pool, template, required, boxRequired, mode, deadline);
+    if (!allocation.available()) return unavailable(allocation.pending() ? "pending"
+        : boxed && boxAvailable < boxRequired && itemAvailable >= required ? "boxes" : "items",
+        itemAvailable, required, boxAvailable, boxRequired);
+    List<ItemStack> outputs = boxed ? packedBoxes(pool, template, boxRequired)
+        : UltsWithdrawalOutput.looseStacks(template, quantity);
+    long storedUsed = boxed ? storedBoxesUsed(pool, originalBoxes, boxRequired) : 0L;
+    return new UltsWithdrawalPlan(true, "", itemAvailable, required, boxAvailable, boxRequired,
+        storedUsed, boxRequired - storedUsed, outputs, Math.max(0L, required - itemAvailable), allocation.steps());
+  }
+
+  /** Whole-request validation shares the exact joint allocation used by individual transactions. */
+  public static UltsWithdrawalAssessment assess(UltsCraftPool pool, ItemStack template, long quantity,
+      boolean boxed, UltsCraftingMode mode, long deadline) {
+    if (template.isEmpty() || quantity < 1L || (boxed && UltsBoxes.isShulker(template)))
+      return UltsWithdrawalAssessment.SHORTAGE;
+    long perUnit = boxed ? (long) SHULKER_SLOTS * template.getMaxStackSize() : 1L;
+    if (quantity > Long.MAX_VALUE / perUnit) return UltsWithdrawalAssessment.SHORTAGE;
+    long required = quantity * perUnit;
+    long boxes = boxed ? quantity : 0L;
+    if (pool.amount(template) >= required && pool.packableAmount() >= boxes)
+      return UltsWithdrawalAssessment.AVAILABLE;
+    Allocation allocation = allocate(pool, template, required, boxes, mode, deadline);
+    return allocation.pending() ? UltsWithdrawalAssessment.WAIT : allocation.available()
+        ? UltsWithdrawalAssessment.AVAILABLE : UltsWithdrawalAssessment.SHORTAGE;
+  }
+
+  private record Allocation(boolean available, boolean pending, List<UltsCraftStep> steps) {}
+
+  private static Allocation allocate(UltsCraftPool pool, ItemStack template, long required,
+      long boxRequired, UltsCraftingMode mode, long deadline) {
+    int mark = pool.mark();
+    UltsCraftPool.Keep incoming = pool.keepState();
+    long plainAvailable = pool.plainPackableAmount(), boxAvailable = pool.packableAmount();
     pool.reserve(template, required);
     try {
-      UltsCraftResolver resolver = UltsCraftResolver.of(pool, mode, true);
+      UltsCraftResolver resolver = UltsCraftResolver.of(pool, mode, true, deadline);
       // Prefer plain boxes, but only if their materials leave enough for the contents. Every box
       // allocation remains provisional until the contents and final packaging check both succeed.
-      long most = boxed ? Math.max(0L, boxRequired - plainAvailable) : 0L;
-      long least = boxed ? Math.max(0L, boxRequired - boxAvailable) : 0L;
+      long most = Math.max(0L, boxRequired - plainAvailable);
+      long least = Math.max(0L, boxRequired - boxAvailable);
       for (long crafted = most; crafted >= least; crafted--) {
         var goals = new ArrayList<UltsCraftResolver.Goal>();
         if (crafted > 0L) goals.add(new UltsCraftResolver.Goal(
             plainBox(), UltsCraftMath.add(pool.amount(plainBox()), crafted)));
         goals.add(new UltsCraftResolver.Goal(template, required));
         List<UltsCraftPlan> plans = resolver.planTogether(goals,
-            () -> !boxed || pool.packableAmount() >= boxRequired, deadline);
+            () -> pool.packableAmount() >= boxRequired, deadline);
         if (plans == null) {
           if (resolver.ranOut()) {
             pool.rollback(mark);
-            return unavailable("pending", itemAvailable, required, boxAvailable, boxRequired);
+            return new Allocation(false, true, List.of());
           }
           continue;
         }
-        List<ItemStack> outputs = boxed
-            ? packedBoxes(pool, template, boxRequired)
-            : UltsWithdrawalOutput.looseStacks(template, quantity);
         List<UltsCraftStep> steps = plans.stream().flatMap(plan -> plan.steps().stream()).toList();
-        long storedUsed = boxed ? storedBoxesUsed(pool, originalBoxes, boxRequired) : 0L;
-        return new UltsWithdrawalPlan(
-            true, "", itemAvailable, required, boxAvailable, boxRequired,
-            storedUsed, boxRequired - storedUsed, outputs,
-            Math.max(0L, required - itemAvailable), steps);
+        return new Allocation(true, false, steps);
       }
       pool.rollback(mark);
-      return unavailable(boxed && boxAvailable < boxRequired && itemAvailable >= required
-          ? "boxes" : "items", itemAvailable, required, boxAvailable, boxRequired);
+      return new Allocation(false, false, List.of());
     } finally { pool.restoreKeep(incoming); }
   }
 

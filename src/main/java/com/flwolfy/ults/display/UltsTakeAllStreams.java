@@ -2,7 +2,7 @@ package com.flwolfy.ults.display;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.UUID;
+import java.util.Collections;
 
 /**
  * Every stock on its way out of the storage at this moment, one stream to a player.
@@ -12,6 +12,9 @@ import java.util.UUID;
  * a take-everything a slow pour rather than one enormous operation.
  */
 public final class UltsTakeAllStreams {
+
+  /** Delivery is visited every server tick; withdrawalRate configures units, not tick spacing. */
+  public static final int DELIVERY_INTERVAL_TICKS = 1;
 
   private final List<UltsTakeAllStream> streams = new ArrayList<>();
 
@@ -32,6 +35,9 @@ public final class UltsTakeAllStreams {
 
   /** One tick of every stream; the ones that have stopped take themselves out. */
   public void tick() {
-    streams.removeIf(stream -> !stream.tick());
+    long deadline = System.nanoTime() + 20_000_000L;
+    streams.removeIf(stream -> !stream.tick(deadline));
+    // Everyone shares the server budget; rotate the first turn so a slow player cannot starve others.
+    if (streams.size() > 1) Collections.rotate(streams, -1);
   }
 }

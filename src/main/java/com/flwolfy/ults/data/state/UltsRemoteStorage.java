@@ -274,16 +274,29 @@ public final class UltsRemoteStorage {
       Access access, UltsState recovery, ItemStack template,
       int quantity, boolean boxed, UltsCraftingMode mode
   ) {
+    return take(access, recovery, template, quantity, boxed, mode, Long.MAX_VALUE).outputs();
+  }
+
+  public static UltsWithdrawalResult take(
+      MinecraftServer server, List<UltsBinding> bindings, UltsState recovery,
+      ItemStack template, int quantity, boolean boxed, UltsCraftingMode mode, long deadline) {
+    return take(access(server, bindings), recovery, template, quantity, boxed, mode, deadline);
+  }
+
+  static UltsWithdrawalResult take(
+      Access access, UltsState recovery, ItemStack template,
+      int quantity, boolean boxed, UltsCraftingMode mode, long deadline
+  ) {
     Snapshot live = snapshot(access);
     UltsCraftPool before = UltsCraftPool.of(live.items());
     UltsWithdrawalPlan plan = UltsWithdrawalPlanner.plan(
-        before.copy(), template, quantity, boxed, mode);
+        before.copy(), template, quantity, boxed, mode, deadline);
     if (!plan.available()) {
-      return List.of();
+      return "pending".equals(plan.problem()) ? UltsWithdrawalResult.WAIT : UltsWithdrawalResult.EMPTY;
     }
     UltsCraftPool after = before.copy();
     if (!UltsWithdrawalPlanner.run(after, plan, template, quantity, boxed)) {
-      return List.of();
+      return UltsWithdrawalResult.EMPTY;
     }
     List<ItemStack> removed = new ArrayList<>();
     for (int index = 0; index < before.size(); index++) {
@@ -293,7 +306,7 @@ public final class UltsRemoteStorage {
           access,
           stack -> UltsStackKinds.same(stack, kind), used, removed)) {
         restoreOrKeep(access, recovery, removed);
-        return List.of();
+        return UltsWithdrawalResult.EMPTY;
       }
     }
     // What a run made on the way stays in the storage: it was never asked for.
@@ -306,7 +319,7 @@ public final class UltsRemoteStorage {
       }
     }
     restoreOrKeep(access, recovery, leftovers);
-    return plan.outputs().stream().map(ItemStack::copy).toList();
+    return new UltsWithdrawalResult(plan.outputs().stream().map(ItemStack::copy).toList(), false);
   }
 
   private static void restoreOrKeep(Access access, UltsState recovery, List<ItemStack> stacks) {

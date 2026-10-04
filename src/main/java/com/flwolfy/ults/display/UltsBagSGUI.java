@@ -90,7 +90,8 @@ public final class UltsBagSGUI extends SimpleGui {
         if (gui == null || !gui.isOpen()) {
           return true;
         }
-        if (gui.runtime == runtime && gui.renderedRevision != runtime.contentRevision()) {
+        if (gui.runtime == runtime && (gui.renderedRevision != runtime.contentRevision()
+            || runtime.craftablePending())) {
           gui.render();
         }
         return false;
@@ -157,10 +158,10 @@ public final class UltsBagSGUI extends SimpleGui {
    * does.
    */
   private GuiElementBuilder statusBook(int kept, int shown, int pages) {
-    boolean takeAll = runtime.allowTakeAll();
+    boolean takeAll = runtime.allowBulkWithdrawal();
     GuiElementBuilder book = element(Items.WRITABLE_BOOK)
-        .setName(UltsGuiText.text("ults.special.status").copy().withStyle(ChatFormatting.YELLOW))
-        .addLoreLine(UltsGuiText.labelled("ults.special.status.rows", kept, kept == 0));
+        .setName(UltsGuiText.text("ults.special.status").copy().withStyle(ChatFormatting.YELLOW));
+    UltsCraftingLore.stored(book, "ults.special.status.rows", kept, runtime.stockPending(item, runtime.storedItems()));
     if (!filter.isEmpty()) {
       book.addLoreLine(UltsGuiText.labelled("ults.special.status.shown", shown, shown == 0));
     }
@@ -235,15 +236,19 @@ public final class UltsBagSGUI extends SimpleGui {
     // One piece is what the icon shows, whatever the stack holds: how much is there is said in the lore,
     // so a bag reads as rows of one thing each rather than as a row of numbers.
     List<UltsStoredView> stock = runtime.storedItems();
-    long obtainable = UltsCraftMath.add(view.amount(), runtime.craftable(view.template(), stock));
     GuiElementBuilder builder = new GuiElementBuilder(view.template().copyWithCount(1))
-        .addLoreLine(Component.empty())
-        .addLoreLine(UltsGuiText.labelled("ults.gui.amount", view.amount(), view.amount() < 1))
+        .addLoreLine(Component.empty());
+    var craftingAmount = runtime.craftingAmount(view.template(), stock);
+    UltsCraftingLore.stored(builder, "ults.gui.amount", view.amount(), craftingAmount.pending());
+    builder
         .addLoreLine(UltsGuiText.labelled(
             "ults.gui.special.updated", UltsGuiText.stamp(view.updatedAt()), !view.stampKnown()));
-    UltsTakeHints.hints(builder, view.template(), obtainable, "ults.gui.take.choose",
+    long obtainable = UltsCraftMath.add(view.amount(),
+        UltsCraftingLore.add(builder, runtime, view.template(), stock).amount());
+    if (craftingAmount.pending()) builder.addLoreLine(UltsGuiText.text("ults.withdraw.problem.pending"));
+    else UltsTakeHints.hints(builder, view.template(), obtainable, "ults.gui.take.choose",
         UltsTakeHints.boxPossible(runtime, view.template(), stock, obtainable),
-        runtime.allowTakeAll());
+        runtime.allowBulkWithdrawal());
     return builder.setCallback((slot, type, action, gui) -> {
       if (type == ClickType.MOUSE_LEFT) {
         takeOneStack(view);
@@ -254,7 +259,7 @@ public final class UltsBagSGUI extends SimpleGui {
         UltsGuiSound.click(player);
         UltsWithdrawSGUI.open(player, runtime, view.template(),
             () -> UltsBagSGUI.open(player, runtime, item, page));
-      } else if (type == ClickType.MOUSE_RIGHT_SHIFT && runtime.allowTakeAll()) {
+      } else if (type == ClickType.MOUSE_RIGHT_SHIFT && runtime.allowBulkWithdrawal()) {
         // A server that does not allow taking everything answers this click with nothing at all.
         UltsGuiSound.click(player);
         UltsTakeAllSGUI.openForItem(player, runtime, view.template(),
@@ -272,6 +277,7 @@ public final class UltsBagSGUI extends SimpleGui {
    * with, so a click never asks for what is no longer there.
    */
   private void takeOneStack(UltsStoredView view) {
+    if (!UltsCraftingLore.ready(runtime, player, view.template())) { render(); return; }
     int quantity = runtime.stackQuantity(view.template());
     if (quantity < 1) {
       UltsGuiSound.click(player);
@@ -305,6 +311,7 @@ public final class UltsBagSGUI extends SimpleGui {
    * only offered while the storage really can: what is stored plus what could be crafted right now.
    */
   private void takeBox(UltsStoredView view) {
+    if (!UltsCraftingLore.ready(runtime, player, view.template(), true)) { render(); return; }
     UltsWithdrawalPlan plan = runtime.withdrawalPlan(view.template(), 1, true);
     if (!plan.available()) {
       // In the chat, not above the hotbar: how short of a box the storage is, or that no box could be

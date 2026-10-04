@@ -40,7 +40,7 @@ import org.jetbrains.annotations.Nullable;
  *       marked and rolled back instead, and a slot of a recipe is counted by item rather than by stack.
  *   <li>Hopeless branches have to be recognised before they are walked. An item no chain of recipes
  *       can reach from this pile is dropped from every recipe slot before the search starts, which is
- *       what {@link #reach()} works out. Returns are included in that reachability pass.
+ *       what {@link #reach(long)} works out. Returns are included in that reachability pass.
  *   <li>Ingredient bounds group semantically identical slots. Exact rational resource potentials
  *       also prove shortfalls when several conversion routes compete for the same raw materials.
  * </ul>
@@ -117,6 +117,15 @@ public final class UltsCraftResolver {
   private final Map<String, Boolean> mades = new HashMap<>();
   /** Stack to the largest amount the pile can make of it, answered once per stack. */
   private final Map<String, Long> answers = new HashMap<>();
+  /** Proven feasibility probes survive a display tick's deadline; unfinished probes claim nothing. */
+  private final Map<String, CapacitySearch> capacitySearches = new HashMap<>();
+  private static final class CapacitySearch {
+    long low;
+    long high = 1L;
+    boolean expanding = true;
+    boolean checkCeiling;
+    UltsCraftPotential potential;
+  }
 
   private int budget;
   private long deadline = Long.MAX_VALUE;
@@ -134,6 +143,19 @@ public final class UltsCraftResolver {
    * could be crafted a lower bound rather than the whole truth.
    */
   private boolean reachTruncated;
+
+  private static List<UltsCraftRecipe> dependencyRecipes;
+  private static UltsCraftDependencies dependencies;
+
+  /** Includes all alternative ingredients, transitive recipes, returns and required stations. */
+  public static Set<Item> capacityInputs(ItemStack template) {
+    List<UltsCraftRecipe> recipes = source.everything();
+    if (recipes != dependencyRecipes) {
+      dependencies = new UltsCraftDependencies(recipes);
+      dependencyRecipes = recipes;
+    }
+    return dependencies.inputs(template.getItem());
+  }
 
   // ==================== //
   // ===== Creation ===== //
@@ -155,8 +177,13 @@ public final class UltsCraftResolver {
       UltsCraftingMode mode,
       boolean requireStation
   ) {
+    return of(pool, mode, requireStation, Long.MAX_VALUE);
+  }
+
+  public static UltsCraftResolver of(UltsCraftPool pool, UltsCraftingMode mode,
+      boolean requireStation, long deadline) {
     UltsCraftResolver resolver = new UltsCraftResolver(pool, mode, requireStation);
-    resolver.reach();
+    resolver.reach(deadline);
     return resolver;
   }
 
@@ -295,6 +322,7 @@ public final class UltsCraftResolver {
       return UNKNOWN;
     }
     answers.put(wanted, value);
+    capacitySearches.remove(wanted);
     return value;
   }
 
@@ -449,7 +477,7 @@ public final class UltsCraftResolver {
    * deep per round and a chain longer than the search is never marked as reachable. Marking such a
    * chain would show an item as craftable that the search then refuses to make.
    */
-  private void reach() {
+  private void reach(long limit) {
     if (!mode.enabled()) {
       return;
     }
@@ -461,6 +489,10 @@ public final class UltsCraftResolver {
     String[] produced = new String[count];
     List<List<String>> returned = new ArrayList<>(count);
     for (int index = 0; index < count; index++) {
+      if ((index & 63) == 0 && System.nanoTime() >= limit) {
+        reachTruncated = true;
+        return;
+      }
       UltsCraftRecipe recipe = catalogued.get(index);
       produced[index] = key(recipe.result());
       List<String> returns = new ArrayList<>();
@@ -479,18 +511,14 @@ public final class UltsCraftResolver {
       }
       returned.add(List.copyOf(returns));
     }
-    // This pass runs before any question is asked and has no clock of its own, so on a pack with a very
-    // large recipe catalogue it is the one place that could spend a whole tick without noticing. It is a
-    // filter rather than an answer — everything it marks is verified again when a recipe is really tried —
-    // so it stops at a budget and says that it stopped: fewer recipes are known to be in reach, and the
-    // view that was built on a truncated pass is treated as one that has not caught up yet.
+    // This is a filter, not a proof of infeasibility. A truncated pass leaves the exact search available.
     int spent = 0;
     boolean grown = true;
     for (int round = 0; round <= MAX_DEPTH && grown; round++) {
       grown = false;
       Set<String> known = Set.copyOf(reachable);
       for (int index = 0; index < count; index++) {
-        if (++spent > MAX_REACH_NODES) {
+        if (++spent > MAX_REACH_NODES || ((spent & 63) == 0 && System.nanoTime() >= limit)) {
           reachTruncated = true;
           return;
         }
@@ -549,26 +577,66 @@ public final class UltsCraftResolver {
     budget = MAX_ANSWER_NODES;
     ranOut = false;
     deadline = Math.min(deadlineNanos, System.nanoTime() + ANSWER_BACKSTOP_NANOS);
-    potential = UltsCraftPotential.of(template, source.everything().stream().filter(this::station).toList(), deadline);
+    String wanted = key(template);
+    CapacitySearch search = capacitySearches.get(wanted);
+    if (search == null) {
+      search = new CapacitySearch();
+      search.potential = UltsCraftPotential.of(template, source.everything().stream().filter(this::station).toList(), deadline);
+      // A late frame must not permanently disable the useful bound for this item. Retry its
+      // construction with the next frame's budget instead of caching a timed-out null result.
+      if (search.potential == null && System.nanoTime() >= deadline) {
+        ranOut = true;
+        return UNKNOWN;
+      }
+      capacitySearches.put(wanted, search);
+      if (search.potential != null) {
+        // The target's stored pieces are reserved: only additional output contributes to the bound.
+        UltsCraftPool.Keep saved = pool.keepState();
+        pool.reserve(template, pool.amount(template));
+        long bound;
+        try { bound = search.potential.bound(pool); }
+        finally { pool.restoreKeep(saved); }
+        int quantum = 0;
+        for (var route : routes(template, true)) quantum = gcd(quantum, route.outputCount());
+        // Saturating output arithmetic may legitimately reach MAX_VALUE between recipe multiples.
+        search.high = quantum > 0 && bound < Long.MAX_VALUE ? bound - bound % quantum : bound;
+        search.expanding = false;
+        search.checkCeiling = search.high > 0L;
+      }
+    }
+    potential = search.potential;
     UltsCraftPool.Keep previous = pool.keepState();
     pool.reserve(template, pool.amount(template));
     try {
-      long low = 0L, high = 1L;
-      // Expansion and mixed routes are tested by the same feasibility search as planning.
-      while (canProduce(template, high)) {
-        low = high;
-        if (high == Long.MAX_VALUE) return high;
-        high = UltsCraftMath.multiply(high, 2L);
-      }
-      if (ranOut) return UNKNOWN;
-      while (low < high - 1L) {
-        long middle = low + (high - low) / 2L;
-        if (canProduce(template, middle)) low = middle;
-        else high = middle;
+      if (search.checkCeiling) {
+        boolean feasible = canProduce(template, search.high);
         if (ranOut) return UNKNOWN;
+        search.checkCeiling = false;
+        if (feasible) return search.high;
       }
-      return low;
+      // Expansion and mixed routes are tested by the same feasibility search as planning.
+      while (search.expanding) {
+        boolean feasible = canProduce(template, search.high);
+        if (ranOut) return UNKNOWN;
+        if (!feasible) { search.expanding = false; break; }
+        search.low = search.high;
+        if (search.high == Long.MAX_VALUE) return search.high;
+        search.high = UltsCraftMath.multiply(search.high, 2L);
+      }
+      while (search.low < search.high - 1L) {
+        long middle = search.low + (search.high - search.low) / 2L;
+        boolean feasible = canProduce(template, middle);
+        if (ranOut) return UNKNOWN;
+        if (feasible) search.low = middle;
+        else search.high = middle;
+      }
+      return search.low;
     } finally { pool.restoreKeep(previous); }
+  }
+
+  private static int gcd(int first, int second) {
+    while (second != 0) { int rest = first % second; first = second; second = rest; }
+    return first;
   }
 
   private boolean canProduce(ItemStack template, long need) {

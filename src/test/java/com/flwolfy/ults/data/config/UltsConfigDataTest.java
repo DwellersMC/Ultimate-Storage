@@ -43,20 +43,20 @@ class UltsConfigDataTest {
     // The crafting mode, the full-inventory option and how a take-everything pours are carried through.
     assertEquals(UltsCraftingMode.ALL, data.canonicalize().input().crafting());
     assertTrue(data.canonicalize().input().allowFullInventory());
-    assertTrue(data.canonicalize().input().allowTakeAll());
-    assertEquals(120, data.canonicalize().input().takeAllStacks());
-    assertEquals(512, data.canonicalize().input().takeAllRate());
+    assertTrue(data.canonicalize().input().allowBulkWithdrawal());
+    assertEquals(120, data.canonicalize().input().bulkWithdrawalStacks());
+    assertEquals(512, data.canonicalize().input().withdrawalRate());
   }
 
   @Test
   void aTakeEverythingStartsAtOneBackpackAndOneStackATick() {
     // All three are sized for the server that runs them: whether the offer exists at all, how much one
     // click asks for, and how much of it leaves per tick.
-    assertTrue(UltsConfigData.DEFAULT.input().allowTakeAll());
-    assertEquals(36, UltsConfigData.DEFAULT.input().takeAllStacks());
-    assertEquals(64, UltsConfigData.DEFAULT.input().takeAllRate());
-    assertTrue(UltsConfigData.DEFAULT_TAKE_ALL_STACKS <= UltsConfigData.MAX_TAKE_ALL_STACKS);
-    assertTrue(UltsConfigData.DEFAULT_TAKE_ALL_RATE <= UltsConfigData.MAX_TAKE_ALL_RATE);
+    assertTrue(UltsConfigData.DEFAULT.input().allowBulkWithdrawal());
+    assertEquals(36, UltsConfigData.DEFAULT.input().bulkWithdrawalStacks());
+    assertEquals(64, UltsConfigData.DEFAULT.input().withdrawalRate());
+    assertTrue(UltsConfigData.DEFAULT_BULK_WITHDRAWAL_STACKS <= UltsConfigData.MAX_BULK_WITHDRAWAL_STACKS);
+    assertTrue(UltsConfigData.DEFAULT_WITHDRAWAL_RATE <= UltsConfigData.MAX_WITHDRAWAL_RATE);
   }
 
   @Test

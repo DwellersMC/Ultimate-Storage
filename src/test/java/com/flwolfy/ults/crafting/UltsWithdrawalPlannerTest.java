@@ -58,6 +58,50 @@ class UltsWithdrawalPlannerTest {
     for (var view : left.views()) assertEquals(view.amount(), right.amount(view.template()));
     for (var view : right.views()) assertEquals(view.amount(), left.amount(view.template()));
   }
+  @Test void wholeRequestAssessmentHasNoThirtySixStackLimitAndNoOutputAllocation() {
+    var before = pool();
+    before.add(sized(Items.STONE), Long.MAX_VALUE);
+    assertTrue(UltsWithdrawalPlanner.assess(before.copy(), sized(Items.STONE), Long.MAX_VALUE,
+        false, UltsCraftingMode.DISABLED, Long.MAX_VALUE).available());
+    before.add(stack(Items.SHULKER_BOX), 40);
+    assertTrue(UltsWithdrawalPlanner.assess(before.copy(), sized(Items.STONE), 40,
+        true, UltsCraftingMode.DISABLED, Long.MAX_VALUE).available());
+    assertFalse(UltsWithdrawalPlanner.assess(before.copy(), sized(Items.STONE), Long.MAX_VALUE,
+        true, UltsCraftingMode.DISABLED, Long.MAX_VALUE).available(), "contents arithmetic must not saturate into false feasibility");
+    assertEquals(Long.MAX_VALUE, before.amount(sized(Items.STONE)));
+    assertEquals(40, before.packableAmount());
+  }
+
+  @Test void wholeRequestAssessmentDoesNotDoublePromiseSharedBoxAndContentIngredients() {
+    try (var catalog = new UltsTestCatalog(
+        recipe("contents", Items.STICK, 1728, Ingredient.of(Items.WHEAT)),
+        box("box", 1, Ingredient.of(Items.WHEAT)))) {
+      var before = pool();
+      before.add(sized(Items.WHEAT), 1);
+      var insufficient = UltsWithdrawalPlanner.assess(before.copy(), sized(Items.STICK), 1,
+          true, UltsCraftingMode.ALL, Long.MAX_VALUE);
+      assertFalse(insufficient.available());
+      assertFalse(insufficient.pending());
+      before.add(sized(Items.WHEAT), 1);
+      assertTrue(UltsWithdrawalPlanner.assess(before.copy(), sized(Items.STICK), 1,
+          true, UltsCraftingMode.ALL, Long.MAX_VALUE).available());
+      assertEquals(2, before.amount(sized(Items.WHEAT)), "assessing a copy never consumes real stock");
+    }
+  }
+
+  @Test void unfinishedWholeRequestAssessmentWaitsWithoutClaimingShortage() {
+    try (var catalog = new UltsTestCatalog(vanilla())) {
+      var before = pool();
+      before.add(sized(Items.OAK_LOG), 500);
+      before.add(sized(Items.SHULKER_SHELL), 4);
+      var assessment = UltsWithdrawalPlanner.assess(before.copy(), sized(Items.STICK), 2,
+          true, UltsCraftingMode.ALL, System.nanoTime() - 1);
+      assertTrue(assessment.pending());
+      assertFalse(assessment.available());
+      assertEquals(500, before.amount(sized(Items.OAK_LOG)));
+      assertEquals(4, before.amount(sized(Items.SHULKER_SHELL)));
+    }
+  }
   @Test void expiredPreviewIsPendingAndLeavesStockUntouched() {
     try (var catalog = new UltsTestCatalog(vanilla())) {
       var original = pool();

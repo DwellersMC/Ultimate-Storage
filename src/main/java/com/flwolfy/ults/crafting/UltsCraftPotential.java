@@ -49,7 +49,11 @@ final class UltsCraftPotential {
     if (targets.isEmpty()) return null;
     if (recipes.size() > 20_000 || System.nanoTime() >= deadline) return null;
     Map<Item, List<UltsCraftRecipe>> incoming = new HashMap<>();
-    for (var route : recipes) incoming.computeIfAbsent(route.result().getItem(), key -> new ArrayList<>()).add(route);
+    int scanned = 0;
+    for (var route : recipes) {
+      if ((++scanned & 127) == 0 && System.nanoTime() >= deadline) return null;
+      incoming.computeIfAbsent(route.result().getItem(), key -> new ArrayList<>()).add(route);
+    }
     Set<Item> ancestors = new HashSet<>();
     ArrayDeque<Item> pending = new ArrayDeque<>();
     for (ItemStack target : targets) {
@@ -61,6 +65,7 @@ final class UltsCraftPotential {
         relevant.add(route);
         for (var slot : route.ingredients()) {
           for (Item item : UltsIngredients.accepted(slot)) {
+            if ((++scanned & 255) == 0 && System.nanoTime() >= deadline) return null;
             if (ancestors.add(item)) pending.add(item);
           }
         }
@@ -72,6 +77,7 @@ final class UltsCraftPotential {
       if (route.needsStonecutter()) continue;
       for (var slot : route.ingredients()) {
         for (Item item : UltsIngredients.accepted(slot)) {
+          if ((++scanned & 255) == 0 && System.nanoTime() >= deadline) return null;
           var returned = item.getCraftingRemainder();
           if (returned != null && ancestors.contains(returned.create().getItem())) return null;
         }

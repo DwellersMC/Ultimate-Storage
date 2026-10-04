@@ -581,12 +581,12 @@ public final class UltsStorageSGUI extends SimpleGui {
     long amount = view.amount();
     List<UltsStoredView> group = bags.getOrDefault(template.getItem(), List.of());
     if (view.special()) {
-      GuiElementBuilder bag = bagRow(view, group, filter, locale(), player);
+      GuiElementBuilder bag = bagRow(view, group, filter, locale(), player, runtime.stockPending(template.getItem(), stock));
       bag.setCallback((slot, type, action, gui) -> {
         if (type == ClickType.MOUSE_RIGHT) {
           UltsGuiSound.click(player);
           UltsBagSGUI.open(player, runtime, template.getItem());
-        } else if (type == ClickType.MOUSE_RIGHT_SHIFT && runtime.allowTakeAll()) {
+        } else if (type == ClickType.MOUSE_RIGHT_SHIFT && runtime.allowBulkWithdrawal()) {
           // Emptying the whole bag is the question the bag screen's own status book asks, so it is answered
           // by the same screen: a player who asks it from the row does not have to open the bag first.
           UltsGuiSound.click(player);
@@ -598,31 +598,22 @@ public final class UltsStorageSGUI extends SimpleGui {
     }
 
     GuiElementBuilder builder = new GuiElementBuilder(template.copyWithCount(1))
-        .addLoreLine(Component.empty())
-        .addLoreLine(UltsGuiText.labelled("ults.gui.amount", amount, amount == 0));
+        .addLoreLine(Component.empty());
+    var craftingAmount = runtime.craftingAmount(template, stock);
+    UltsCraftingLore.stored(builder, "ults.gui.amount", amount, craftingAmount.pending());
     long boxSize = SHULKER_SLOTS * template.getMaxStackSize();
-    if (boxSize > 0 && amount >= boxSize) {
+    if (!craftingAmount.pending() && boxSize > 0 && amount >= boxSize) {
       builder.addLoreLine(UltsGuiText.boxes(amount / boxSize, amount % boxSize));
     }
-    long craftable = runtime.craftable(template, stock);
-    if (craftable > 0) {
-      builder.addLoreLine(UltsGuiText.labelled(
-          "ults.gui.craftable", UltsGuiText.format(craftable), false));
-    } else if (runtime.craftableWithoutStation(template, stock) > 0) {
-      // The recipe is there and the material is there, only the station is missing: say so instead of
-      // hiding the line, so it is obvious why nothing can be crafted.
-      builder.addLoreLine(UltsGuiText.labelled(
-          "ults.gui.craftable",
-          UltsGuiText.text("ults.gui.craftable.no_station").getString(),
-          true));
-    }
+    long craftable = UltsCraftingLore.add(builder, runtime, template, stock).amount();
     // A row can be taken from while the storage holds the item or could craft it, so an item that is
     // not stored but can be made right now is just as usable. The view answers this even while the
     // exact amount is still being worked out for a later tick.
     long obtainable = UltsCraftMath.add(amount, craftable);
     if (obtainable > 0 || runtime.craftableNow(template, stock)) {
-      boolean takeAll = runtime.allowTakeAll();
-      UltsTakeHints.hints(builder, template, obtainable, "ults.gui.take.choose",
+      boolean takeAll = runtime.allowBulkWithdrawal();
+      if (craftingAmount.pending()) builder.addLoreLine(UltsGuiText.text("ults.withdraw.problem.pending"));
+      else UltsTakeHints.hints(builder, template, obtainable, "ults.gui.take.choose",
           UltsTakeHints.boxPossible(runtime, template, stock, obtainable), takeAll);
       builder.setCallback((slot, type, action, gui) -> {
         if (type == ClickType.MOUSE_LEFT) {
@@ -655,6 +646,7 @@ public final class UltsStorageSGUI extends SimpleGui {
    * shows answers that may be a moment old, and a click must never hand over what is no longer there.
    */
   private void takeOneStack(ItemStack template) {
+    if (!UltsCraftingLore.ready(runtime, player, template)) { render(); return; }
     int quantity = runtime.stackQuantity(template);
     if (quantity < 1) {
       UltsGuiSound.click(player);
@@ -689,6 +681,7 @@ public final class UltsStorageSGUI extends SimpleGui {
    * request that cannot be filled says so instead of taking part of it.
    */
   private void takeBox(ItemStack template) {
+    if (!UltsCraftingLore.ready(runtime, player, template, true)) { render(); return; }
     UltsWithdrawalPlan plan = runtime.withdrawalPlan(template, 1, true);
     if (!plan.available()) {
       // Said in the chat and not above the hotbar: a box cannot be packed for reasons the player has to be
@@ -906,6 +899,11 @@ public final class UltsStorageSGUI extends SimpleGui {
       String locale,
       Player player
   ) {
+    return bagRow(view, group, filter, locale, player, false);
+  }
+
+  private static GuiElementBuilder bagRow(UltsStoredView view, List<UltsStoredView> group,
+      String filter, String locale, Player player, boolean pending) {
     ItemStack newest = view.template();
     List<Component> content = UltsItemNames.tooltip(newest, player);
     List<Component> lines = new ArrayList<>();
@@ -919,9 +917,10 @@ public final class UltsStorageSGUI extends SimpleGui {
     lines.add(searched
         // One line and not two: what the bag would hand over while the search is on, which is what a
         // player looking at a filtered listing is asking about.
-        ? UltsGuiText.labelled(
-            "ults.gui.bag.entries.filtered", keptInBag(group, filter, locale), false)
-        : UltsGuiText.labelled("ults.gui.bag.entries", group.size(), false));
+        ? UltsGuiText.labelled("ults.gui.bag.entries.filtered", pending
+            ? UltsGuiText.text("ults.gui.craftable.pending").getString() : UltsGuiText.format(keptInBag(group, filter, locale)), false)
+        : UltsGuiText.labelled("ults.gui.bag.entries", pending
+            ? UltsGuiText.text("ults.gui.craftable.pending").getString() : UltsGuiText.format(group.size()), false));
     lines.add(UltsGuiText.labelled(
         "ults.gui.special.updated", UltsGuiText.stamp(view.updatedAt()), !view.stampKnown()));
 
@@ -938,7 +937,7 @@ public final class UltsStorageSGUI extends SimpleGui {
    * itself as well as one a row answers.
    */
   private static boolean takeAllAllowed() {
-    return UltsConfigManager.getInstance().data().input().allowTakeAll();
+    return UltsConfigManager.getInstance().data().input().allowBulkWithdrawal();
   }
 
   /**

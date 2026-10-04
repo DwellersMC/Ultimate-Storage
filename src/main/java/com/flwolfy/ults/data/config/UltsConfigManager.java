@@ -161,8 +161,15 @@ public final class UltsConfigManager {
       }
       root = parsed.getAsJsonObject();
     }
-    // The migrations run before the defaults are merged in, so a field that was renamed keeps the
-    // value the file holds instead of being filled in with the new default.
+    UltsConfigData loaded = decode(root, UltsLangManager.getInstance().availableLocales());
+    save(loaded);
+    return loaded;
+  }
+
+  /** The file and tests share migration, default merging and validation, without publishing values. */
+  static UltsConfigData decode(JsonObject root, java.util.Set<String> availableLocales) {
+    // Rename before merging defaults, otherwise a legacy custom value would be hidden by a default.
+    migrateWithdrawalFields(root);
     mergeDefaults(root, GSON.toJsonTree(UltsConfigData.DEFAULT).getAsJsonObject());
     dropRetiredVisibility(root);
     dropRetiredCrafting(root);
@@ -170,13 +177,27 @@ public final class UltsConfigManager {
     dropRetiredSpecialFields(root);
     dropRetiredStackByData(root);
     UltsConfigData loaded = GSON.fromJson(root, UltsConfigData.class);
-    if (loaded == null || !loaded.validate().isEmpty()) {
+    if (loaded == null || !loaded.validate(availableLocales).isEmpty()) {
       throw new IllegalArgumentException("Invalid Ults config fields: "
-          + (loaded == null ? java.util.List.of("root") : loaded.validate()));
+          + (loaded == null ? java.util.List.of("root") : loaded.validate(availableLocales)));
     }
-    loaded = loaded.canonicalize();
-    save(loaded);
-    return loaded;
+    return loaded.canonicalize();
+  }
+
+  private static void migrateWithdrawalFields(JsonObject root) {
+    JsonElement input = root.get("input");
+    if (input == null || !input.isJsonObject()) return;
+    JsonObject object = input.getAsJsonObject();
+    rename(object, "allowTakeAll", "allowBulkWithdrawal");
+    rename(object, "takeAllStacks", "bulkWithdrawalStacks");
+    rename(object, "takeAllRate", "withdrawalRate");
+  }
+
+  /** An explicitly configured new field wins; absent or null fields may inherit their old value. */
+  private static void rename(JsonObject object, String previous, String current) {
+    JsonElement legacy = object.remove(previous);
+    JsonElement configured = object.get(current);
+    if (legacy != null && (configured == null || configured.isJsonNull())) object.add(current, legacy);
   }
 
   /**

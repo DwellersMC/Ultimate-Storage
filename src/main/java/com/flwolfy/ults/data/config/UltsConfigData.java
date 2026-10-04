@@ -4,6 +4,7 @@ import com.flwolfy.ults.data.lang.UltsLangManager;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import net.minecraft.resources.Identifier;
 
 public record UltsConfigData(General general, Input input, Special special) {
@@ -20,13 +21,13 @@ public record UltsConfigData(General general, Input input, Special special) {
   public static final int MAX_BUNDLE_SLOTS = 1_000_000;
 
   /** How many stacks one "take everything" takes out of the box: one backpack's worth. */
-  public static final int DEFAULT_TAKE_ALL_STACKS = 36;
+  public static final int DEFAULT_BULK_WITHDRAWAL_STACKS = 36;
   /** The largest single take-everything a server may be asked for. */
-  public static final int MAX_TAKE_ALL_STACKS = 1_000_000;
-  /** How many items one "take everything" hands over per tick out of the box: one stack a tick. */
-  public static final int DEFAULT_TAKE_ALL_RATE = 64;
-  /** The fastest a take-everything may hand items over, per tick. */
-  public static final int MAX_TAKE_ALL_RATE = 1_000_000;
+  public static final int MAX_BULK_WITHDRAWAL_STACKS = 1_000_000;
+  /** Default output-unit limit per tick for quantity and bulk withdrawals. */
+  public static final int DEFAULT_WITHDRAWAL_RATE = 64;
+  /** Maximum configurable output-unit limit per tick for withdrawal streams. */
+  public static final int MAX_WITHDRAWAL_RATE = 1_000_000;
 
   public record General(
       String language,
@@ -44,9 +45,9 @@ public record UltsConfigData(General general, Input input, Special special) {
    * @param crafting whether a withdrawal may craft what is missing
    * @param allowFullInventory whether a withdrawal may go ahead with no room in the inventory, in
    *     which case what does not fit is dropped on the ground
-   * @param allowTakeAll whether players may empty a stock out with "take everything" at all
-   * @param takeAllStacks the most one "take everything" may take, counted in stacks
-   * @param takeAllRate how many items one "take everything" hands over per tick while it runs
+   * @param allowBulkWithdrawal whether players may empty a stock out with "take everything" at all
+   * @param bulkWithdrawalStacks the most one "take everything" may take, counted in stacks
+   * @param withdrawalRate maximum output units per tick for quantity and bulk withdrawal streams
    */
   public record Input(
       int permissionLevel,
@@ -55,9 +56,9 @@ public record UltsConfigData(General general, Input input, Special special) {
       List<String> multiBlockContainers,
       UltsCraftingMode crafting,
       boolean allowFullInventory,
-      boolean allowTakeAll,
-      int takeAllStacks,
-      int takeAllRate
+      boolean allowBulkWithdrawal,
+      int bulkWithdrawalStacks,
+      int withdrawalRate
   ) {}
 
   /**
@@ -79,7 +80,7 @@ public record UltsConfigData(General general, Input input, Special special) {
   public static final UltsConfigData DEFAULT = new UltsConfigData(
       new General("en_us", UltsItemVisibility.AVAILABLE, UltsStorageMode.VOID),
       new Input(2, 0, 2, List.of(), UltsCraftingMode.DISABLED, false, true,
-          DEFAULT_TAKE_ALL_STACKS, DEFAULT_TAKE_ALL_RATE),
+          DEFAULT_BULK_WITHDRAWAL_STACKS, DEFAULT_WITHDRAWAL_RATE),
       new Special(
           DEFAULT_BUNDLE_SLOTS,
           UltsStackRule.COMPONENTS,
@@ -93,9 +94,14 @@ public record UltsConfigData(General general, Input input, Special special) {
   }
 
   public List<String> validate() {
+    return validate(UltsLangManager.getInstance().availableLocales());
+  }
+
+  /** The same validation with explicit bundled locales for tests outside Fabric. */
+  List<String> validate(Set<String> availableLocales) {
     List<String> invalid = new ArrayList<>();
     if (general == null || general.language() == null
-        || !UltsLangManager.getInstance().availableLocales().contains(
+        || !availableLocales.contains(
             general.language().trim().toLowerCase(Locale.ROOT))) {
       invalid.add("general.language");
     }
@@ -123,13 +129,13 @@ public record UltsConfigData(General general, Input input, Special special) {
     if (input == null || input.crafting() == null) {
       invalid.add("input.crafting");
     }
-    if (input == null || input.takeAllStacks() < 1
-        || input.takeAllStacks() > MAX_TAKE_ALL_STACKS) {
-      invalid.add("input.takeAllStacks");
+    if (input == null || input.bulkWithdrawalStacks() < 1
+        || input.bulkWithdrawalStacks() > MAX_BULK_WITHDRAWAL_STACKS) {
+      invalid.add("input.bulkWithdrawalStacks");
     }
-    if (input == null || input.takeAllRate() < 1
-        || input.takeAllRate() > MAX_TAKE_ALL_RATE) {
-      invalid.add("input.takeAllRate");
+    if (input == null || input.withdrawalRate() < 1
+        || input.withdrawalRate() > MAX_WITHDRAWAL_RATE) {
+      invalid.add("input.withdrawalRate");
     }
     if (special == null || special.bundleSlots() < 1
         || special.bundleSlots() > MAX_BUNDLE_SLOTS) {
@@ -163,9 +169,9 @@ public record UltsConfigData(General general, Input input, Special special) {
             normalize(input.multiBlockContainers()),
             input.crafting(),
             input.allowFullInventory(),
-            input.allowTakeAll(),
-            input.takeAllStacks(),
-            input.takeAllRate()
+            input.allowBulkWithdrawal(),
+            input.bulkWithdrawalStacks(),
+            input.withdrawalRate()
         ),
         new Special(
             special.bundleSlots(),

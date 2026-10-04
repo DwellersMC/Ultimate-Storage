@@ -36,7 +36,7 @@ import net.minecraft.world.item.Items;
  *
  * <p>A stock can hold more than any backpack ever will, so "everything" is not one measurement but two:
  * what is there, and what one click takes. The row says both, and the confirmation starts the second as a
- * <b>stream</b>: {@code input.takeAllStacks} at most, handed over a tick's worth at a time, into the
+ * <b>stream</b>: {@code input.bulkWithdrawalStacks} at most, handed over a tick's worth at a time, into the
  * backpack first and onto the ground after that while {@code input.allowFullInventory} says so. Whatever
  * the click could not take stays in the storage and is said on the button, so a player emptying a
  * warehouse knows what came out, what is still there, and can watch it arrive.
@@ -70,6 +70,8 @@ public final class UltsTakeAllSGUI extends SimpleGui {
   /** Whether the recipes may fill in what the storage is short of, which the mode slot switches. */
   private boolean crafting;
   private long renderedRevision;
+  private boolean submitted;
+  private boolean pending;
 
   private UltsTakeAllSGUI(
       ServerPlayer player,
@@ -110,7 +112,7 @@ public final class UltsTakeAllSGUI extends SimpleGui {
       ItemStack template,
       Runnable returnTo
   ) {
-    if (!runtime.allowTakeAll()) {
+    if (!runtime.allowBulkWithdrawal()) {
       return null;
     }
     List<UltsStoredView> stock = runtime.storedItemsFresh();
@@ -137,7 +139,7 @@ public final class UltsTakeAllSGUI extends SimpleGui {
       Item item,
       Runnable returnTo
   ) {
-    if (!runtime.allowTakeAll()) {
+    if (!runtime.allowBulkWithdrawal()) {
       return null;
     }
     long stored = 0L;
@@ -156,7 +158,7 @@ public final class UltsTakeAllSGUI extends SimpleGui {
   }
 
   private long total(boolean withCrafting) {
-    return UltsCraftMath.add(stored, withCrafting ? craftable : 0L);
+    return withCrafting ? craftable > 0L ? UltsCraftMath.add(stored, craftable) : 0L : stored;
   }
 
   /**
@@ -178,6 +180,7 @@ public final class UltsTakeAllSGUI extends SimpleGui {
       amounts = bag.rows().stream().map(UltsStoredView::amount).toList();
       stored = bag.total();
       craftable = 0L;
+      pending = runtime.stockPending(bagItem, stock);
       return;
     }
     if (wanted.isEmpty()) {
@@ -185,12 +188,15 @@ public final class UltsTakeAllSGUI extends SimpleGui {
       // throw where a redraw is expected.
       stored = 0L;
       craftable = 0L;
+      pending = false;
       return;
     }
     List<UltsStoredView> stock = fresh ? runtime.storedItemsFresh() : runtime.storedItems();
     stored = UltsRuntime.storedAmount(wanted.getFirst(), stock);
-    craftable = fresh ? runtime.craftableFresh(wanted.getFirst(), stock)
-        : runtime.craftable(wanted.getFirst(), stock);
+    var amount = fresh ? runtime.craftingAmountFresh(wanted.getFirst(), stock)
+        : runtime.craftingAmount(wanted.getFirst(), stock);
+    craftable = amount.amount();
+    pending = amount.pending();
   }
 
   /** Whether a mode is on offer: taking what is stored needs something stored, crafting needs a recipe. */
@@ -215,7 +221,7 @@ public final class UltsTakeAllSGUI extends SimpleGui {
         return true;
       }
       if (gui.runtime == runtime
-          && (gui.renderedRevision != runtime.contentRevision() || runtime.craftablePending())) {
+          && (gui.renderedRevision != runtime.contentRevision() || gui.pending || runtime.craftablePending())) {
         gui.render();
       }
       return false;
@@ -236,7 +242,7 @@ public final class UltsTakeAllSGUI extends SimpleGui {
     // have its wait counted off twice as fast as the budget intends.
     return UltsTakeAllPlan.of(
         total(withCrafting), wanted, amounts, runtime.allowFullInventory(),
-        runtime.takeAllStacks(), UltsBackpack.slots(player));
+        runtime.bulkWithdrawalStacks(), UltsBackpack.slots(player));
   }
 
   private void render() {
@@ -283,24 +289,24 @@ public final class UltsTakeAllSGUI extends SimpleGui {
     mode
         .setName(UltsGuiText.text(withCrafting ? "ults.all.mode.craft" : "ults.all.mode.item").copy()
             .withStyle(ChatFormatting.YELLOW))
-        .addLoreLine(Component.empty())
+        .addLoreLine(Component.empty());
+    UltsCraftingLore.stored(mode, "ults.all.stored", stored, pending);
+    if (!wholeBag && runtime.craftingMode().enabled() && (pending || craftable > 0L))
+      UltsCraftingLore.stored(mode, "ults.all.craftable", craftable, pending);
+    mode
         .addLoreLine(UltsGuiText.labelled(
-            "ults.all.stored", UltsGuiText.format(stored), stored < 1L))
-        .addLoreLine(UltsGuiText.labelled(
-            "ults.all.craftable", UltsGuiText.format(craftable), craftable < 1L))
-        .addLoreLine(UltsGuiText.labelled(
-            "ults.all.total", UltsGuiText.format(total(withCrafting)), !modeOffered(withCrafting)));
-    if (modeOffered(!withCrafting)) {
-      mode.addLoreLine(UltsGuiText.text("ults.all.mode.toggle").copy()
-          .withStyle(ChatFormatting.GRAY));
-      mode.setCallback((slot, type, action, gui) -> {
-        UltsGuiSound.click(player);
-        crafting = !crafting;
-        render();
-      });
-    } else {
-      // The other answer cannot be served, so the slot says which one it is instead of offering it.
-      mode.addLoreLine(UltsGuiText.text(withCrafting ? "ults.all.plain.none" : "ults.all.craft.none")
+            "ults.all.total", pending ? UltsGuiText.text("ults.gui.craftable.pending").getString()
+                : UltsGuiText.format(total(withCrafting)), !pending && !modeOffered(withCrafting)));
+    mode.addLoreLine(UltsGuiText.text("ults.all.mode.toggle").copy()
+        .withStyle(ChatFormatting.GRAY));
+    mode.setCallback((slot, type, action, gui) -> {
+      if (submitted) return;
+      UltsGuiSound.click(player);
+      crafting = !crafting;
+      render();
+    });
+    if (!pending && !modeOffered(withCrafting)) {
+      mode.addLoreLine(UltsGuiText.text(withCrafting ? "ults.all.craft.none" : "ults.all.plain.none")
           .copy().withStyle(ChatFormatting.RED));
     }
     return mode;
@@ -321,10 +327,10 @@ public final class UltsTakeAllSGUI extends SimpleGui {
    */
   private GuiElementBuilder confirmElement() {
     UltsTakeAllPlan plan = plan(crafting);
-    boolean canTake = plan.possible();
+    boolean canTake = !pending && modeOffered(crafting) && plan.possible();
     String name = canTake
         ? "ults.all.confirm"
-        : plan.blocked() ? "ults.all.confirm.full" : "ults.all.confirm.none";
+        : pending ? "ults.withdraw.unavailable" : plan.blocked() ? "ults.all.confirm.full" : "ults.all.confirm.none";
     GuiElementBuilder confirm = new GuiElementBuilder(canTake ? Items.DYE.lime() : Items.BARRIER)
         .setName(UltsGuiText.text(name).copy()
             .withStyle(canTake ? ChatFormatting.GREEN : ChatFormatting.RED));
@@ -347,7 +353,9 @@ public final class UltsTakeAllSGUI extends SimpleGui {
     } else {
       // Why the click cannot be served, in the same words the amount screen uses for the same answer.
       confirm.addLoreLine(UltsGuiText.text(
-          plan.total() <= 0L ? "ults.all.plain.none" : "ults.withdraw.problem.inventory")
+          pending ? "ults.withdraw.problem.pending"
+              : !modeOffered(crafting) ? crafting ? "ults.all.craft.none" : "ults.all.plain.none"
+                  : "ults.withdraw.problem.inventory")
           .copy().withStyle(ChatFormatting.RED));
     }
     return confirm;
@@ -360,21 +368,26 @@ public final class UltsTakeAllSGUI extends SimpleGui {
    * as it stands, and a click that can no longer be served redraws the screen instead of promising more
    * than it can keep. What the click promises is not handed over at once but poured out a tick's worth at
    * a time by {@link UltsTakeAllStream}, which is what keeps a warehouse-sized stock from being one
-   * enormous operation — and what lets the pour stop the moment the player opens a screen or cannot
-   * receive any more.
+   * enormous operation, and lets delivery stop safely when the player cannot receive any more.
    *
    * @param withCrafting whether the recipes may fill in what the storage is short of
    */
   private void confirm(boolean withCrafting) {
-    if (!runtime.allowTakeAll()) {
+    if (submitted) return;
+    if (!runtime.allowBulkWithdrawal()) {
       close();
       returnTo.run();
       return;
     }
     // A click is answered from the storage as it stands, not from the numbers the last draw was made of.
     refreshTotals(true);
+    if (pending) {
+      UltsGuiChat.failure(player, "ults.withdraw.problem.pending");
+      render();
+      return;
+    }
     UltsTakeAllPlan plan = plan(withCrafting);
-    if (!plan.possible()) {
+    if (!modeOffered(withCrafting) || !plan.possible()) {
       UltsGuiSound.click(player);
       // Said in the chat, like every other refusal a screen makes: it stays where the player can read it
       // back, instead of fading above the hotbar while they are still looking at the screen.
@@ -383,6 +396,7 @@ public final class UltsTakeAllSGUI extends SimpleGui {
       return;
     }
     UltsGuiSound.confirm(player);
+    submitted = true;
     close();
     UltsTakeAllStream.start(
         runtime, player, wanted, plan.amounts(),

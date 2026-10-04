@@ -515,6 +515,11 @@ public final class UltsState extends SavedData {
     return UltsWithdrawalPlanner.plan(craftPool(), template, quantity, boxed, mode);
   }
 
+  public synchronized UltsWithdrawalPlan withdrawalPlan(
+      ItemStack template, int quantity, boolean boxed, UltsCraftingMode mode, long deadline) {
+    return UltsWithdrawalPlanner.plan(craftPool(), template, quantity, boxed, mode, deadline);
+  }
+
   /**
    * Runs a decided withdrawal.
    *

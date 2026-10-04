@@ -21,13 +21,13 @@ import org.junit.jupiter.api.Test;
  * at once, which the withdrawal planner refuses past one backpack, and a refused plan left the room with
  * nothing taken and nothing said.
  *
- * <p>The amount is {@code input.takeAllStacks} at most, one backpack's worth by default, and the storage
+ * <p>The amount is {@code input.bulkWithdrawalStacks} at most, one backpack's worth by default, and the storage
  * pours it out a tick's worth at a time; the plan this class tests is what the screen promises before the
  * click. Under the test bootstrap every stack is one piece, so a piece is a slot.
  */
 class UltsTakeAllPlanTest {
 
-  private static final int LIMIT = UltsConfigData.DEFAULT_TAKE_ALL_STACKS;
+  private static final int LIMIT = UltsConfigData.DEFAULT_BULK_WITHDRAWAL_STACKS;
 
   @Test
   void oneClickCarriesItsLimitAndSaysWhatItLeaves() {
