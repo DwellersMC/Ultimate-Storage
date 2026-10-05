@@ -139,6 +139,7 @@ public final class UltsServerAcceptance implements ModInitializer {
           UltsNativeQuantity.check(server, this::check);
           com.flwolfy.ults.UltsNativeStability.check(server, this::check);
           com.flwolfy.ults.UltsNativeLargeCraft.check(server, this::check);
+          com.flwolfy.ults.UltsNativeHugeCraft.check(server, this::check);
         }
         catch (Exception error) { throw new IllegalStateException(error); }
       }

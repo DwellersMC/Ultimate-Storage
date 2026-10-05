@@ -179,6 +179,11 @@ public final class UltsCraftPool {
     return index < 0 ? 0L : amounts[index];
   }
 
+  public long usableAmount(ItemStack template) {
+    int index = indexOf(template);
+    return index < 0 ? 0L : usable(index);
+  }
+
   /** Whether the pile holds at least one of this item, whatever its components are. */
   public boolean has(Item item) {
     int id = UltsIngredients.itemId(item);

@@ -17,6 +17,32 @@ import org.junit.jupiter.api.Test;
 class UltsRuntimeTest {
   @BeforeAll static void boot() { UltsTestBootstrap.boot(); }
 
+  static void expireCraftingBudget(UltsRuntime runtime, long tick) throws Exception {
+    var frame = UltsRuntime.class.getDeclaredField("craftableBudgetTick"); frame.setAccessible(true); frame.setLong(runtime, tick);
+    var deadline = UltsRuntime.class.getDeclaredField("craftableDeadline"); deadline.setAccessible(true); deadline.setLong(runtime, Long.MIN_VALUE);
+    var deferred = UltsRuntime.class.getDeclaredField("craftableDeferred"); deferred.setAccessible(true); deferred.setBoolean(runtime, false);
+  }
+
+  @Test void aCalculationStillRefreshesAfterMoreThanTwoHundredBusyTicks() throws Exception {
+    var defaults = UltsConfigData.DEFAULT;
+    var config = new UltsConfigData(defaults.general(), new UltsConfigData.Input(
+        2, 0, 2, List.of(), UltsCraftingMode.ALL, true, true, 36, 64), defaults.special());
+    var recipe = new UltsCraftRecipe(false, "test:planks", List.of(Ingredient.of(Items.OAK_LOG)), stack(Items.OAK_PLANKS), 4);
+    try (var active = new UltsTestConfig(config); var catalog = new UltsTestCatalog(recipe)) {
+      var state = new UltsState(); state.deposit(stack(Items.OAK_LOG).copyWithCount(40_000_003)); state.deposit(stack(Items.CRAFTING_TABLE));
+      long[] tick = {1}; var runtime = new UltsRuntime(null, state, () -> tick[0]);
+      for (int frame = 0; frame < 250; frame++) {
+        tick[0]++; expireCraftingBudget(runtime, tick[0]);
+        assertTrue(runtime.craftingAmount(stack(Items.OAK_PLANKS), state.items()).pending());
+        assertTrue(runtime.craftablePending(), "the screen must keep refreshing at frame " + frame);
+      }
+      tick[0]++;
+      var answer = runtime.craftingAmount(stack(Items.OAK_PLANKS), state.items());
+      assertFalse(answer.pending()); assertEquals(160_000_012, answer.amount());
+      assertEquals(40_000_003, UltsRuntime.storedAmount(stack(Items.OAK_LOG), state.items()));
+    }
+  }
+
   @Test void quantityStabilityIgnoresRowOrderAndEquivalentRowSplits() {
     var runtime = new UltsRuntime(null, new UltsState(), () -> 1);
     var stone = stack(Items.STONE);

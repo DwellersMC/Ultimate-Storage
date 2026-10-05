@@ -125,7 +125,37 @@ public final class UltsCraftResolver {
     boolean expanding = true;
     boolean checkCeiling;
     UltsCraftPotential potential;
+    int quantum;
+    boolean balanced;
+    boolean strengthen;
+    List<Set<Item>> focuses = List.of();
+    int focusIndex;
+    int cutIndex;
+    Map<Item, Long> supplies = new HashMap<>();
+    boolean familyBounded;
+    Set<Item> family;
+    int familyQuantum;
+    boolean familyBalanced;
+    int familyFocusIndex;
+    ProbeReplay replay;
+    List<UltsCraftRecipe> recipes;
   }
+
+  /** Completed failed subtrees can be replayed as proofs on the next slice of the same immutable
+   * probe. Traversal order and the active potential are frozen; unfinished subtrees claim nothing. */
+  private static final class ProbeReplay {
+    final long need;
+    final UltsCraftPotential potential;
+    final long revision;
+    final java.util.TreeMap<Long, Long> failures = new java.util.TreeMap<>();
+    long position;
+    boolean recording;
+    ProbeReplay(long need, UltsCraftPotential potential, long revision) {
+      this.need = need; this.potential = potential; this.revision = revision;
+    }
+  }
+  private ProbeReplay replay;
+  private long proofRevision;
 
   private int budget;
   private long deadline = Long.MAX_VALUE;
@@ -136,7 +166,13 @@ public final class UltsCraftResolver {
   private Set<Item> possibleReturns;
   private Set<Item> returnDependent;
   private final Map<Ingredient, List<Item>> slotKeys = new HashMap<>();
+  private final Map<Ingredient, Set<Item>> slotInputs = new HashMap<>();
   private @Nullable UltsCraftPotential potential;
+  private final Map<Ingredient, UltsCraftPotential> inputPotentials = new HashMap<>();
+  private record OutputDependencyKey(List<UltsCraftRecipe> routes, Set<String> goals) {}
+  private final Map<OutputDependencyKey, Boolean> independentOutputs = new HashMap<>();
+  private List<UltsCraftPotential.Demand> unfinished = List.of();
+  private List<UltsCraftPotential.OutputCredit> anticipated = List.of();
 
   /**
    * Whether the reachability pass stopped at its budget, which makes everything this view says about what
@@ -581,7 +617,8 @@ public final class UltsCraftResolver {
     CapacitySearch search = capacitySearches.get(wanted);
     if (search == null) {
       search = new CapacitySearch();
-      search.potential = UltsCraftPotential.of(template, source.everything().stream().filter(this::station).toList(), deadline);
+      search.recipes = source.everything().stream().filter(this::station).toList();
+      search.potential = UltsCraftPotential.of(template, search.recipes, deadline);
       // A late frame must not permanently disable the useful bound for this item. Retry its
       // construction with the next frame's budget instead of caching a timed-out null result.
       if (search.potential == null && System.nanoTime() >= deadline) {
@@ -594,30 +631,106 @@ public final class UltsCraftResolver {
         UltsCraftPool.Keep saved = pool.keepState();
         pool.reserve(template, pool.amount(template));
         long bound;
-        try { bound = search.potential.bound(pool); }
+        try { bound = Math.min(search.potential.bound(pool), upper(routes(template, true), 1, path(template))); }
         finally { pool.restoreKeep(saved); }
         int quantum = 0;
         for (var route : routes(template, true)) quantum = gcd(quantum, route.outputCount());
+        search.quantum = quantum;
         // Saturating output arithmetic may legitimately reach MAX_VALUE between recipe multiples.
         search.high = quantum > 0 && bound < Long.MAX_VALUE ? bound - bound % quantum : bound;
         search.expanding = false;
         search.checkCeiling = search.high > 0L;
+        var required = capacityInputs(template);
+        var focuses = new java.util.LinkedHashSet<Set<Item>>();
+        for (var route : search.recipes) if (required.contains(route.result().getItem()))
+          for (var ingredient : route.ingredients()) focuses.add(Set.copyOf(UltsIngredients.accepted(ingredient)));
+        search.focuses = List.copyOf(focuses);
       }
     }
     potential = search.potential;
     UltsCraftPool.Keep previous = pool.keepState();
     pool.reserve(template, pool.amount(template));
     try {
+      // Apply integer family bounds before testing the first fractional ceiling. A coarse batch
+      // conversion can make that ceiling impossible and its mixed-route proof extremely expensive.
+      // Timeouts retain the initialized search and retry only this unfinished bound next frame.
+      if (search.potential != null && !search.familyBounded) {
+        if (search.family == null) {
+          var family = cardinalityFamily(template.getItem(), search.recipes);
+          if (family == null) { ranOut = true; return UNKNOWN; }
+          search.family = Set.copyOf(family);
+          search.familyQuantum = familyQuantum(family, search.recipes);
+        }
+        if (search.family.size() > 1 && search.familyQuantum > 1) {
+          var targets = search.family.stream().map(Item::getDefaultInstance).toList();
+          if (!search.familyBalanced) {
+            var proof = UltsCraftPotential.balanced(targets, search.recipes, pool, deadline);
+            if (proof == null && System.nanoTime() >= deadline) { ranOut = true; return UNKNOWN; }
+            tightenFamily(search, proof);
+            search.familyBalanced = true;
+          }
+          // A pigment's abundant stock cannot compensate for missing glass. Check focused family
+          // proofs as well as the balanced proof, retaining each completed stage across deadlines.
+          while (search.familyFocusIndex < search.focuses.size()) {
+            var proof = UltsCraftPotential.focused(targets, search.recipes, search.focuses.get(search.familyFocusIndex), deadline);
+            if (proof == null && System.nanoTime() >= deadline) { ranOut = true; return UNKNOWN; }
+            tightenFamily(search, proof);
+            search.familyFocusIndex++;
+          }
+        }
+        search.familyBounded = true;
+      }
+      if (search.potential != null && search.strengthen) {
+        if (!search.balanced) {
+          var proof = UltsCraftPotential.balanced(template, search.recipes, pool, deadline);
+          if (proof == null && System.nanoTime() >= deadline) { ranOut = true; return UNKNOWN; }
+          search.balanced = true;
+          tighten(search, proof);
+        }
+        while (search.focusIndex < search.focuses.size()) {
+          var proof = UltsCraftPotential.focused(template, search.recipes, search.focuses.get(search.focusIndex), deadline);
+          if (proof == null && System.nanoTime() >= deadline) { ranOut = true; return UNKNOWN; }
+          search.focusIndex++;
+          tighten(search, proof);
+          var balancedProof = UltsCraftPotential.balanced(template, search.recipes, pool, deadline, search.focuses.get(search.focusIndex - 1));
+          if (balancedProof == null && System.nanoTime() >= deadline) { search.focusIndex--; ranOut = true; return UNKNOWN; }
+          tighten(search, balancedProof);
+        }
+        while (search.cutIndex < search.focuses.size()) {
+          var sources = search.focuses.get(search.cutIndex);
+          if (sources.stream().noneMatch(item -> capacityInputs(item.getDefaultInstance()).contains(template.getItem()))) {
+            var proof = UltsCraftPotential.cut(template, search.recipes, sources, possibleReturns == null ? Set.of() : possibleReturns, deadline);
+            if (proof == null && System.nanoTime() >= deadline) { ranOut = true; return UNKNOWN; }
+            if (proof != null) {
+              long supply = 0;
+              for (Item source : sources) {
+                Long count = search.supplies.get(source);
+                if (count == null) {
+                  count = sourceSupply(source, search.recipes);
+                  if (ranOut) return UNKNOWN;
+                  search.supplies.put(source, count);
+                }
+                supply = UltsCraftMath.add(supply, count);
+              }
+              long bound = proof.boundWithSources(pool, sources, supply);
+              if (search.quantum > 0 && bound < Long.MAX_VALUE) bound -= bound % search.quantum;
+              if (bound < search.high) { search.high = bound; search.checkCeiling = true; }
+            }
+          }
+          search.cutIndex++;
+        }
+        potential = search.potential;
+      }
       if (search.checkCeiling) {
-        boolean feasible = canProduce(template, search.high);
-        if (ranOut) return UNKNOWN;
+        boolean feasible = capacityProbe(template, search.high, search);
+        if (ranOut) { search.strengthen = true; return UNKNOWN; }
         search.checkCeiling = false;
         if (feasible) return search.high;
       }
       // Expansion and mixed routes are tested by the same feasibility search as planning.
       while (search.expanding) {
-        boolean feasible = canProduce(template, search.high);
-        if (ranOut) return UNKNOWN;
+        boolean feasible = capacityProbe(template, search.high, search);
+        if (ranOut) { search.strengthen = true; return UNKNOWN; }
         if (!feasible) { search.expanding = false; break; }
         search.low = search.high;
         if (search.high == Long.MAX_VALUE) return search.high;
@@ -625,8 +738,8 @@ public final class UltsCraftResolver {
       }
       while (search.low < search.high - 1L) {
         long middle = search.low + (search.high - search.low) / 2L;
-        boolean feasible = canProduce(template, middle);
-        if (ranOut) return UNKNOWN;
+        boolean feasible = capacityProbe(template, middle, search);
+        if (ranOut) { search.strengthen = true; return UNKNOWN; }
         if (feasible) search.low = middle;
         else search.high = middle;
       }
@@ -637,6 +750,101 @@ public final class UltsCraftResolver {
   private static int gcd(int first, int second) {
     while (second != 0) { int rest = first % second; first = second; second = rest; }
     return first;
+  }
+
+  /** Follow quantity-preserving conversions, such as eight plain panes into eight coloured panes.
+   * The total family stock can only change by the gcd of every recipe's net contribution. */
+  private @Nullable Set<Item> cardinalityFamily(Item target, List<UltsCraftRecipe> recipes) {
+    var family = new HashSet<Item>(); family.add(target);
+    int work = 0;
+    boolean changed;
+    do {
+      changed = false;
+      for (var route : recipes) {
+        if (++work > MAX_REACH_NODES || ((work & 255) == 0 && System.nanoTime() >= deadline)) return null;
+        if (family.contains(route.result().getItem())) {
+          var repeated = new HashMap<List<Item>, Integer>();
+          for (Ingredient slot : route.ingredients()) repeated.merge(slotKey(slot), 1, Integer::sum);
+          for (var entry : repeated.entrySet()) if (entry.getValue() == route.outputCount()) changed |= family.addAll(entry.getKey());
+        } else {
+          int consumed = 0;
+          for (Ingredient slot : route.ingredients()) {
+            var accepted = slotKey(slot);
+            if (!accepted.isEmpty() && family.containsAll(accepted)) consumed++;
+          }
+          if (consumed == route.outputCount()) changed |= family.add(route.result().getItem());
+        }
+      }
+    } while (changed);
+    return family;
+  }
+
+  private int familyQuantum(Set<Item> family, List<UltsCraftRecipe> recipes) {
+    if (possibleReturns != null && possibleReturns.stream().anyMatch(family::contains)) return 1;
+    int quantum = 0;
+    for (var route : recipes) {
+      int net = family.contains(route.result().getItem()) ? route.outputCount() : 0;
+      for (Ingredient slot : route.ingredients()) {
+        var accepted = slotKey(slot);
+        boolean any = accepted.stream().anyMatch(family::contains);
+        if (any && !family.containsAll(accepted)) return 1;
+        if (any) net--;
+      }
+      quantum = gcd(quantum, Math.abs(net));
+      if (quantum == 1) break;
+    }
+    return quantum;
+  }
+
+  private boolean capacityProbe(ItemStack template, long need, CapacitySearch search) {
+    if (search.replay == null || search.replay.need != need || search.replay.potential != potential
+        || search.replay.revision != proofRevision)
+      search.replay = new ProbeReplay(need, potential, proofRevision);
+    var active = search.replay; active.position = 0;
+    replay = active;
+    try {
+      boolean feasible = canProduce(template, need);
+      if (ranOut) active.recording = true;
+      return feasible;
+    } finally { replay = null; }
+  }
+
+  private long sourceSupply(Item source, List<UltsCraftRecipe> recipes) {
+    var ingredient = Ingredient.of(source);
+    long total = upper(ingredient, 1, new HashMap<>());
+    if (ranOut) return Long.MAX_VALUE;
+    var incoming = pool.keepState();
+    long held = pool.matches(ingredient);
+    for (var row : pool.matchingViews(ingredient)) pool.reserve(row.template(), pool.amount(row.template()));
+    try {
+      var proof = UltsCraftPotential.balanced(source.getDefaultInstance(), recipes, pool, deadline);
+      if (proof == null && System.nanoTime() >= deadline) { ranOut = true; return Long.MAX_VALUE; }
+      if (proof != null) {
+        int quantum = 0;
+        for (var route : recipes) if (route.result().is(source) && (reachTruncated || runnable(route, reachable))) quantum = gcd(quantum, route.outputCount());
+        long extra = quantum == 0 ? 0 : proof.bound(pool);
+        if (quantum > 0 && extra < Long.MAX_VALUE) extra -= extra % quantum;
+        total = Math.min(total, UltsCraftMath.add(held, extra));
+      }
+      return total;
+    } finally { pool.restoreKeep(incoming); }
+  }
+
+  private void tighten(CapacitySearch search, @Nullable UltsCraftPotential proof) {
+    if (proof == null) return;
+    long bound = proof.bound(pool);
+    if (search.quantum > 0 && bound < Long.MAX_VALUE) bound -= bound % search.quantum;
+    // A tighter resource bound is inclusive. It replaces a previously disproven high endpoint,
+    // so it must be tested before binary search can treat it as an infeasible endpoint again.
+    if (bound < search.high) { search.high = bound; search.potential = proof; search.checkCeiling = true; }
+  }
+
+  private void tightenFamily(CapacitySearch search, @Nullable UltsCraftPotential proof) {
+    if (proof == null) return;
+    long bound = proof.bound(pool, List.copyOf(search.family));
+    long held = pool.matches(Ingredient.of(search.family.stream()));
+    if (bound < Long.MAX_VALUE && bound >= held) bound -= (bound - held) % search.familyQuantum;
+    if (bound < search.high) { search.high = bound; search.checkCeiling = true; }
   }
 
   private boolean canProduce(ItemStack template, long need) {
@@ -655,6 +863,7 @@ public final class UltsCraftResolver {
 
   /** Every allocation pays for work. Exhaustion is not a proof of infeasibility. */
   private boolean visit() {
+    if (replay != null) replay.position++;
     if (ranOut || budget-- <= 0 || frames >= 128
         || ((budget & (CLOCK_EVERY - 1)) == 0 && System.nanoTime() >= deadline)) {
       ranOut = true;
@@ -689,6 +898,25 @@ public final class UltsCraftResolver {
     if (upper(options, depth, visiting) < need) return false;
     frames++;
     try {
+      // Try direct alternatives before enumerating a mixture. A coarse crafting batch may leave
+      // a remainder that a stonecutter handles immediately. Each preference gets a small share of
+      // the existing node budget; exhausting it is not a negative feasibility result.
+      if ((replay == null || !replay.recording) && options.size() > 1 && goal.stream().allMatch(stack -> ItemStack.isSameItemSameComponents(stack, goal.getFirst()))) {
+        for (var option : options) {
+          int remaining = budget;
+          int allowance = Math.min(256, Math.max(0, remaining / (options.size() + 1)));
+          if (allowance == 0) break;
+          budget = allowance;
+          var routePath = new HashSet<>(visiting); routePath.add(key(option.result()));
+          long operations = UltsCraftMath.divideRoundingUp(need, option.outputCount());
+          boolean completed = batch(option, operations, List.of(), goal, need, steps, depth, routePath, visiting, next);
+          int spent = allowance - budget;
+          budget = Math.max(0, remaining - spent);
+          if (completed) return true;
+          if (System.nanoTime() >= deadline || budget <= 0) { ranOut = true; return false; }
+          ranOut = false;
+        }
+      }
       for (int routeIndex = 0; routeIndex < options.size(); routeIndex++) {
         UltsCraftRecipe route = options.get(routeIndex);
         Set<String> routePath = new HashSet<>(visiting);
@@ -698,14 +926,37 @@ public final class UltsCraftResolver {
             && returnDependent.contains(option.result().getItem()));
         // With no reusable returns, each route's quantity need only be chosen once.
         List<UltsCraftRecipe> later = reusable ? options : options.subList(routeIndex + 1, options.size());
+        if (!reusable && !later.isEmpty() && hasSeparateHeld(route, later) && independentOutputs(options, goal)
+            && prefix(route, wanted, later, goal, need, steps, depth, routePath, visiting, next)) return true;
+        if (ranOut) return false;
         long bound = upper(List.of(route), depth, routePath);
         if (bound >= UltsCraftMath.multiply(wanted, route.outputCount())
             && batch(route, wanted, later, goal, need, steps, depth, routePath, visiting, next)) return true;
         if (ranOut) return false;
+        // The last route cannot cover its outstanding result with fewer runs. With no useful
+        // remainders and one exact output kind, exploring millions of smaller batches proves the
+        // same shortfall repeatedly. Ingredient choices for the full batch were already explored.
+        if (!reusable && later.isEmpty() && goal.stream().allMatch(stack ->
+            ItemStack.isSameItemSameComponents(stack, route.result()))) continue;
         long maximum = maxBatch(route, wanted, depth, routePath);
         if (ranOut) return false;
         if (maximum == wanted) maximum--;
-        for (long operations = maximum; operations > 0L; operations--) {
+        long minimum = 1L;
+        if (!reusable && !later.isEmpty() && independentOutputs(options, goal)) {
+          long remainderBound = upper(later, depth, visiting);
+          if (ranOut) return false;
+          minimum = Math.max(minimum, UltsCraftMath.divideRoundingUp(Math.max(0L, need - remainderBound), route.outputCount()));
+          var related = new java.util.LinkedHashSet<Ingredient>(route.ingredients());
+          unfinished.forEach(demand -> related.add(demand.ingredient()));
+          var bounds = new ArrayList<UltsCraftPotential>();
+          related.forEach(ingredient -> bounds.add(inputPotentials.get(ingredient)));
+          if (potential != null) bounds.add(potential);
+          for (var boundProof : bounds) if (boundProof != null && minimum <= maximum) {
+            var range = boundProof.batches(pool, unfinished, anticipated, route, later, need, minimum, maximum);
+            minimum = Math.max(minimum, range[0]); maximum = Math.min(maximum, range[1]);
+          }
+        }
+        for (long operations = maximum; operations >= minimum; operations--) {
           if (!visit()) return false;
           if (batch(route, operations, later, goal, need, steps, depth, routePath, visiting, next)) return true;
           if (ranOut) return false;
@@ -715,52 +966,265 @@ public final class UltsCraftResolver {
     } finally { frames--; }
   }
 
-  private boolean batch(UltsCraftRecipe route, long operations, List<UltsCraftRecipe> later,
-      List<ItemStack> goal, long need, @Nullable List<UltsCraftStep> steps, int depth,
-      Set<String> routePath, Set<String> visiting, Continuation next) {
-    long before = outputStock(goal);
-    return gather(route, operations, steps, depth, routePath, () -> {
-      UltsCraftPool.Keep previous = pool.keepState();
-      if (depth == 1) pool.reserve(route.result(), pool.amount(route.result()));
-      long gain = outputStock(goal) - before;
-      long remaining = gain >= 0L ? Math.max(0L, need - gain) : UltsCraftMath.add(need, -gain);
-      try { return produce(later, goal, remaining, steps, depth, visiting, next); }
-      finally { pool.restoreKeep(previous); }
+  private boolean independentOutputs(List<UltsCraftRecipe> options, List<ItemStack> goal) {
+    if (goal.stream().allMatch(stack -> ItemStack.isSameItemSameComponents(stack, goal.getFirst()))) return true;
+    var dependencyKey = new OutputDependencyKey(List.copyOf(options), goal.stream().map(UltsCraftResolver::key).collect(java.util.stream.Collectors.toUnmodifiableSet()));
+    return independentOutputs.computeIfAbsent(dependencyKey, ignored -> {
+      var outputs = new HashMap<Item, String>();
+      for (ItemStack target : goal) {
+        String before = outputs.putIfAbsent(target.getItem(), key(target));
+        if (before != null && !before.equals(key(target))) return false;
+      }
+      // A child's extra output of a different goal kind could pay part of the request. Only use
+      // the route interval when no recipe input can manufacture any of those other goal kinds.
+      for (var route : options) for (Ingredient ingredient : route.ingredients())
+        for (Item material : UltsIngredients.accepted(ingredient))
+          for (Item input : capacityInputs(material.getDefaultInstance()))
+            if (outputs.containsKey(input) && input != route.result().getItem()) return false;
+      return true;
     });
   }
 
+  /** Try independent material families before mixing them. The reservation is only a search
+   * preference; failure returns to the unrestricted exact search. */
+  private boolean hasSeparateHeld(UltsCraftRecipe route, List<UltsCraftRecipe> later) {
+    var current = route.ingredients().stream().map(this::slotKey).toList();
+    for (var option : later) for (Ingredient ingredient : option.ingredients())
+      if (!current.contains(slotKey(ingredient)) && pool.matches(ingredient) > 0) return true;
+    return false;
+  }
+
+  private boolean prefix(UltsCraftRecipe route, long wanted, List<UltsCraftRecipe> later,
+      List<ItemStack> goal, long need, @Nullable List<UltsCraftStep> steps, int depth,
+      Set<String> routePath, Set<String> visiting, Continuation next) {
+    var original = pool.keepState();
+    boolean held = false;
+    for (var option : later) for (var ingredient : option.ingredients())
+      for (var row : pool.matchingViews(ingredient)) {
+        pool.reserve(row.template(), pool.amount(row.template())); held = true;
+      }
+    if (!held) return false;
+    try {
+      long high = wanted;
+      if (potential != null) {
+        long bound = potential.bound(pool, List.of(route.result().getItem()));
+        if (bound != Long.MAX_VALUE) high = Math.min(high, bound / route.outputCount());
+      }
+      if (high <= 0) return false;
+      long maximum = maxBatch(route, high, depth, routePath, need, true);
+      if (ranOut || maximum <= 0) return false;
+      var protectedStock = pool.keepState();
+      pool.restoreKeep(original);
+      long remainderBound;
+      try { remainderBound = upper(later, depth, visiting); }
+      finally { pool.restoreKeep(protectedStock); }
+      if (ranOut || Math.max(0L, need - UltsCraftMath.multiply(maximum, route.outputCount())) > remainderBound) return false;
+      return batch(route, maximum, later, goal, need, steps, depth, routePath, visiting, original, next);
+    } finally { pool.restoreKeep(original); }
+  }
+
+  private boolean batch(UltsCraftRecipe route, long operations, List<UltsCraftRecipe> later,
+      List<ItemStack> goal, long need, @Nullable List<UltsCraftStep> steps, int depth,
+      Set<String> routePath, Set<String> visiting, Continuation next) {
+    return batch(route, operations, later, goal, need, steps, depth, routePath, visiting, null, next);
+  }
+
+  private boolean batch(UltsCraftRecipe route, long operations, List<UltsCraftRecipe> later,
+      List<ItemStack> goal, long need, @Nullable List<UltsCraftStep> steps, int depth,
+      Set<String> routePath, Set<String> visiting, @Nullable UltsCraftPool.Keep release, Continuation next) {
+    long before = outputStock(goal);
+    var quantities = new HashMap<String, Long>();
+    for (ItemStack target : goal) quantities.put(com.flwolfy.ults.data.state.UltsStackKinds.of(target), pool.amount(target));
+    long surplus = Math.max(0L, UltsCraftMath.multiply(operations, route.outputCount()) - need);
+    var beforeDemands = unfinished;
+    long outstanding = Math.max(0L, need - UltsCraftMath.multiply(operations, route.outputCount()));
+    var options = new ArrayList<>(later); options.add(route);
+    if (release == null && outstanding > 0 && independentOutputs(options, goal)) {
+      var demands = new ArrayList<>(unfinished);
+      demands.add(new UltsCraftPotential.Demand(Ingredient.of(goal.stream().map(ItemStack::getItem).distinct()), outstanding));
+      unfinished = demands;
+    }
+    try { return gather(route, operations, steps, depth, routePath, surplus, () -> {
+      var activeDemands = unfinished; unfinished = beforeDemands;
+      UltsCraftPool.Keep previous = pool.keepState();
+      if (release != null) pool.restoreKeep(release);
+      long gain = 0L;
+      var counted = new HashSet<String>();
+      for (ItemStack target : goal) {
+        String key = com.flwolfy.ults.data.state.UltsStackKinds.of(target);
+        if (!counted.add(key)) continue;
+        long growth = Math.max(0L, pool.amount(target) - quantities.get(key));
+        gain = UltsCraftMath.add(gain, growth);
+        // Protect newly promised units across later routes, while the original compatible
+        // materials remain available for conversions (for example paper into sticks).
+        pool.reserve(target, UltsCraftMath.add(pool.amount(target) - pool.usableAmount(target), growth));
+      }
+      if (depth == 1) gain = outputStock(goal) - before;
+      long remaining = gain >= 0L ? Math.max(0L, need - gain) : UltsCraftMath.add(need, -gain);
+      try { return produce(later, goal, remaining, steps, depth, visiting, next); }
+      finally { pool.restoreKeep(previous); unfinished = activeDemands; }
+    }); } finally { unfinished = beforeDemands; }
+  }
+
   private long maxBatch(UltsCraftRecipe route, long high, int depth, Set<String> visiting) {
-    if (probeBatch(route, high, depth, visiting)) return high;
+    return maxBatch(route, high, depth, visiting, Long.MAX_VALUE, false);
+  }
+
+  private long maxBatch(UltsCraftRecipe route, long high, int depth, Set<String> visiting, long need, boolean future) {
+    if (probeBatch(route, high, depth, visiting, need, future)) return high;
     long low = 0L;
     while (!ranOut && low < high - 1L) {
       long middle = low + (high - low) / 2L;
-      if (probeBatch(route, middle, depth, visiting)) low = middle;
+      if (probeBatch(route, middle, depth, visiting, need, future)) low = middle;
       else high = middle;
     }
     return low;
   }
 
-  private boolean probeBatch(UltsCraftRecipe route, long operations, int depth, Set<String> visiting) {
+  private boolean probeBatch(UltsCraftRecipe route, long operations, int depth, Set<String> visiting, long need, boolean future) {
     if (upper(List.of(route), depth, visiting) < UltsCraftMath.multiply(operations, route.outputCount())) {
       return false;
     }
     int mark = pool.mark();
-    boolean result = gather(route, operations, null, depth, visiting, () -> true);
+    var before = unfinished;
+    var beforeCredits = anticipated;
+    if (!future) { unfinished = List.of(); anticipated = List.of(); }
+    boolean result;
+    try { result = gather(route, operations, null, depth, visiting,
+        Math.max(0L, UltsCraftMath.multiply(operations, route.outputCount()) - need), () -> true); }
+    finally { unfinished = before; anticipated = beforeCredits; }
     pool.rollback(mark);
     return result;
   }
 
   private boolean gather(UltsCraftRecipe route, long operations,
-      @Nullable List<UltsCraftStep> steps, int depth, Set<String> visiting, Continuation next) {
+      @Nullable List<UltsCraftStep> steps, int depth, Set<String> visiting, long surplus, Continuation next) {
+    var active = replay;
+    long start = active == null ? 0 : active.position;
+    if (active != null && active.recording) {
+      Long end = active.failures.get(start);
+      if (end != null) { active.position = end; return false; }
+    }
+    boolean result = gatherUncached(route, operations, steps, depth, visiting, surplus, next);
+    if (!result && !ranOut && active != null && active.recording && active.position > start) {
+      // A parent proof subsumes its completed child proofs, keeping the frontier compact.
+      active.failures.subMap(start, false, active.position, false).clear();
+      if (active.failures.size() < 8192 || active.failures.containsKey(start)) active.failures.put(start, active.position);
+    }
+    return result;
+  }
+
+  private boolean gatherUncached(UltsCraftRecipe route, long operations,
+      @Nullable List<UltsCraftStep> steps, int depth, Set<String> visiting, long surplus, Continuation next) {
     if (!visit()) return false;
+    var demands = new ArrayList<>(unfinished);
+    for (Ingredient ingredient : route.ingredients()) demands.add(new UltsCraftPotential.Demand(ingredient, operations));
+    var credits = new ArrayList<>(anticipated);
+    if (surplus > 0) credits.add(new UltsCraftPotential.OutputCredit(route.result(), surplus));
+    var residues = demandResidues(demands, credits);
+    if (ranOut) return false;
+    if (potential != null && !potential.sufficientInputs(pool, demands, credits, residues)) return false;
+    for (Ingredient ingredient : new java.util.LinkedHashSet<>(route.ingredients())) {
+      if (!inputPotentials.containsKey(ingredient)) {
+        var inputs = UltsIngredients.accepted(ingredient).stream().map(Item::getDefaultInstance).toList();
+        var recipes = source.everything().stream().filter(this::station).toList();
+        var bound = UltsCraftPotential.balanced(inputs, recipes, pool, deadline);
+        if (bound == null && System.nanoTime() < deadline) bound = UltsCraftPotential.of(inputs, recipes, deadline);
+        if (bound == null && System.nanoTime() >= deadline) { ranOut = true; return false; }
+        inputPotentials.put(ingredient, bound);
+        if (bound != null) {
+          proofRevision++;
+          // New pruning inequalities can change ordinal traversal. Never reuse a subtree proof
+          // from the previous traversal, including proofs recorded earlier in this same slice.
+          if (replay != null) { replay.failures.clear(); replay.recording = false; }
+        }
+      }
+      var bound = inputPotentials.get(ingredient);
+      if (bound != null && !bound.sufficientInputs(pool, demands, credits, residues)) return false;
+    }
     int mark = pool.mark(), stepMark = steps == null ? 0 : steps.size();
-    boolean result = slots(route, order(route.ingredients(), operations), 0, operations,
-        new ArrayList<>(), steps, depth, visiting, next);
+    var beforeCredits = anticipated;
+    anticipated = credits;
+    boolean result;
+    try {
+      result = slots(route, grouped(route.ingredients(), operations), 0, operations,
+          new ArrayList<>(), steps, depth, visiting, () -> {
+            var active = anticipated;
+            anticipated = beforeCredits;
+            try { return next.run(); }
+            finally { anticipated = active; }
+          });
+    } finally { anticipated = beforeCredits; }
     if (!result) { pool.rollback(mark); truncate(steps, stepMark); }
     return result;
   }
 
-  private boolean slots(UltsCraftRecipe route, List<Ingredient> ingredients, int index,
+  private record DemandQuantumKey(Set<Item> family, Set<Item> goals) {}
+  private final Map<DemandQuantumKey, Integer> demandQuanta = new HashMap<>();
+  private Map<Item, List<UltsCraftRecipe>> demandRecipes;
+
+  /** All manufacturing steps preserve each family's cardinality modulo their net batch gcd.
+   * Explicit ingredient consumption is accounted separately. Any forced leftover also consumes
+   * resource potential, even when a fractional bound would allow the very last output unit. */
+  private List<UltsCraftPotential.Residue> demandResidues(List<UltsCraftPotential.Demand> demands,
+      List<UltsCraftPotential.OutputCredit> credits) {
+    var goals = new HashSet<Item>();
+    var families = new java.util.LinkedHashSet<Set<Item>>();
+    for (var demand : demands) {
+      var accepted = Set.copyOf(slotKey(demand.ingredient()));
+      goals.addAll(accepted); families.add(accepted);
+    }
+    var result = new ArrayList<UltsCraftPotential.Residue>();
+    for (var family : families) {
+      if (family.isEmpty()) continue;
+      boolean mixed = demands.stream().anyMatch(demand -> {
+        var accepted = slotKey(demand.ingredient());
+        return accepted.stream().anyMatch(family::contains) && !family.containsAll(accepted);
+      });
+      if (mixed) continue;
+      var key = new DemandQuantumKey(family, Set.copyOf(goals));
+      Integer quantum = demandQuanta.get(key);
+      if (quantum == null) {
+        if (demandRecipes == null) {
+          var incoming = new HashMap<Item, List<UltsCraftRecipe>>();
+          int scanned = 0;
+          for (var recipe : source.everything()) {
+            if ((++scanned & 127) == 0 && System.nanoTime() >= deadline) { ranOut = true; return List.of(); }
+            if (station(recipe)) incoming.computeIfAbsent(recipe.result().getItem(), ignored -> new ArrayList<>()).add(recipe);
+          }
+          demandRecipes = incoming;
+        }
+        var pending = new java.util.ArrayDeque<>(goals);
+        var seen = new HashSet<>(goals);
+        var recipes = new java.util.LinkedHashSet<UltsCraftRecipe>();
+        int scanned = 0;
+        while (!pending.isEmpty()) {
+          if ((++scanned & 127) == 0 && System.nanoTime() >= deadline) { ranOut = true; return List.of(); }
+          Item output = pending.remove();
+          for (var recipe : demandRecipes.getOrDefault(output, List.of())) {
+            recipes.add(recipe);
+            for (Ingredient slot : recipe.ingredients()) for (Item input : slotKey(slot))
+              if (seen.add(input)) pending.add(input);
+          }
+        }
+        quantum = familyQuantum(family, List.copyOf(recipes));
+        demandQuanta.put(key, quantum);
+      }
+      if (quantum <= 1) continue;
+      var balance = java.math.BigInteger.ZERO;
+      for (int index = 0; index < pool.size(); index++) if (family.contains(pool.templateAt(index).getItem()))
+        balance = balance.add(java.math.BigInteger.valueOf(pool.usableAmountAt(index)));
+      for (var credit : credits) if (family.contains(credit.template().getItem()))
+        balance = balance.add(java.math.BigInteger.valueOf(credit.amount()));
+      for (var demand : demands) if (family.containsAll(slotKey(demand.ingredient())))
+        balance = balance.subtract(java.math.BigInteger.valueOf(demand.amount()));
+      int residue = balance.mod(java.math.BigInteger.valueOf(quantum)).intValue();
+      if (residue > 0) result.add(new UltsCraftPotential.Residue(family, residue));
+    }
+    return result;
+  }
+
+  private boolean slots(UltsCraftRecipe route, List<UltsCraftPotential.Demand> ingredients, int index,
       long operations, List<UltsStoredView> consumed, @Nullable List<UltsCraftStep> steps,
       int depth, Set<String> visiting, Continuation next) {
     if (index == ingredients.size()) {
@@ -774,9 +1238,21 @@ public final class UltsCraftResolver {
       if (steps != null) steps.add(step);
       return next.run();
     }
-    Ingredient slot = ingredients.get(index);
-    return consume(slot, pool.matchingViews(slot), 0, operations, consumed, steps, depth, visiting, true,
-        () -> slots(route, ingredients, index + 1, operations, consumed, steps, depth, visiting, next));
+    Ingredient slot = ingredients.get(index).ingredient();
+    long needed = ingredients.get(index).amount();
+    var before = unfinished;
+    var future = new ArrayList<>(before);
+    for (int remaining = index + 1; remaining < ingredients.size(); remaining++)
+      future.add(ingredients.get(remaining));
+    unfinished = future;
+    try {
+      return consume(slot, pool.matchingViews(slot), 0, needed, consumed, steps, depth, visiting, true, () -> {
+        var active = unfinished;
+        unfinished = before;
+        try { return slots(route, ingredients, index + 1, operations, consumed, steps, depth, visiting, next); }
+        finally { unfinished = active; }
+      });
+    } finally { unfinished = before; }
   }
 
   /** Reserve concrete materials; later failures can change a slot's allocation or recipe. */
@@ -785,27 +1261,41 @@ public final class UltsCraftResolver {
       int depth, Set<String> visiting, boolean allowCraft, Continuation next) {
     if (need <= 0L) return next.run();
     if (!visit()) return false;
+    var manufacture = allowCraft && depth < MAX_DEPTH ? manufacturingOptions(slot, visiting) : List.<UltsCraftRecipe>of();
     if (index == held.size()) {
       if (!allowCraft || depth >= MAX_DEPTH) return false;
-      List<UltsCraftRecipe> options = new ArrayList<>();
-      for (ItemStack candidate : candidates(slot)) {
-        if (!visiting.contains(key(candidate))) {
-          for (UltsCraftRecipe route : routes(candidate, false)) {
-            if (!options.contains(route)) options.add(route);
-          }
-        }
-      }
-      return produce(options, need, steps, depth + 1, visiting,
-          () -> consume(slot, pool.matchingViews(slot), 0, need, consumed, steps, depth, visiting, false, next));
+      var before = pool.keepState();
+      return produce(manufacture, need, steps, depth + 1, visiting, () -> {
+        var promised = pool.keepState();
+        pool.restoreKeep(before);
+        try { return consume(slot, pool.matchingViews(slot), 0, need, consumed, steps, depth, visiting, false, next); }
+        finally { pool.restoreKeep(promised); }
+      });
     }
     UltsStoredView material = held.get(index);
     long maximum = Math.min(need, material.amount()), minimum = 0L;
-    if (!allowCraft || candidates(slot).isEmpty() || depth >= MAX_DEPTH) {
+    if (manufacture.isEmpty()) {
       long rest = 0L;
       for (int other = index + 1; other < held.size(); other++) {
         rest = UltsCraftMath.add(rest, held.get(other).amount());
       }
       minimum = Math.max(0L, need - rest);
+    }
+    if (!manufacture.isEmpty() && index == held.size() - 1 && minimum < maximum
+        && possibleReturns != null && possibleReturns.stream().noneMatch(item -> UltsIngredients.accepts(slot, item))) {
+      var manufactured = manufacture.stream().map(route -> route.result().getItem()).distinct().toList();
+      var related = new java.util.LinkedHashSet<Ingredient>();
+      related.add(slot);
+      unfinished.forEach(demand -> related.add(demand.ingredient()));
+      var bounds = new ArrayList<UltsCraftPotential>();
+      related.forEach(ingredient -> bounds.add(inputPotentials.get(ingredient)));
+      if (potential != null) bounds.add(potential);
+      for (var bound : bounds) if (bound != null) {
+        var range = bound.allocation(pool, unfinished, anticipated, material.template().getItem(),
+            manufactured, need, minimum, maximum);
+        minimum = Math.max(minimum, range[0]); maximum = Math.min(maximum, range[1]);
+        if (minimum > maximum) return false;
+      }
     }
     for (long amount = maximum; amount >= minimum; amount--) {
       if (!visit()) return false;
@@ -824,8 +1314,27 @@ public final class UltsCraftResolver {
     return false;
   }
 
+  private List<UltsCraftRecipe> manufacturingOptions(Ingredient slot, Set<String> visiting) {
+    var options = new ArrayList<UltsCraftRecipe>();
+    for (ItemStack candidate : candidates(slot)) if (!visiting.contains(key(candidate)))
+      for (var route : routes(candidate, false)) if (!nonIncreasingConversion(route, slot) && !options.contains(route)) options.add(route);
+    return options;
+  }
+
   private static void truncate(@Nullable List<UltsCraftStep> steps, int size) {
     if (steps != null) steps.subList(size, steps.size()).clear();
+  }
+
+  /** An ingredient matches by item, so recolouring an already accepted item cannot fill a shortage.
+   * Keep expanding recipes and recipes with remainders: either may create useful additional stock. */
+  private boolean nonIncreasingConversion(UltsCraftRecipe route, Ingredient wanted) {
+    int consumed = 0;
+    for (Ingredient slot : route.ingredients()) {
+      var accepted = UltsIngredients.accepted(slot);
+      if (accepted.stream().anyMatch(item -> item.getCraftingRemainder() != null)) return false;
+      if (!accepted.isEmpty() && accepted.stream().allMatch(item -> UltsIngredients.accepts(wanted, item))) consumed++;
+    }
+    return consumed >= route.outputCount();
   }
 
   /** Ignore competition between different inputs: only proven shortfalls can be pruned.
@@ -841,11 +1350,12 @@ public final class UltsCraftResolver {
         .sorted(Comparator.comparingInt(UltsIngredients::itemId)).toList());
   }
 
-  private record Cost(int output, Map<List<Item>, Ingredient> slots) {}
+  private record CostKey(Map<List<Item>, Integer> counts, int output) {}
+  private record Cost(int factor, Map<List<Item>, Ingredient> slots) {}
 
   private long upper(List<UltsCraftRecipe> options, int depth, Map<BoundKey, Long> known) {
     if (!visit()) return Long.MAX_VALUE;
-    Map<Map<List<Item>, Integer>, Cost> costs = new HashMap<>();
+    Map<CostKey, Cost> costs = new HashMap<>();
     for (UltsCraftRecipe route : options) {
       Map<List<Item>, Integer> counts = new HashMap<>();
       Map<List<Item>, Ingredient> slots = new HashMap<>();
@@ -854,20 +1364,27 @@ public final class UltsCraftResolver {
         counts.merge(key, 1, Integer::sum);
         slots.put(key, slot);
       }
-      Cost existing = costs.get(counts);
-      if (existing == null || existing.output() < route.outputCount()) {
-        costs.put(Map.copyOf(counts), new Cost(route.outputCount(), slots));
-      }
+      int common = route.outputCount();
+      for (int count : counts.values()) common = gcd(common, count);
+      final int divisor = common;
+      if (divisor > 1) counts.replaceAll((key, count) -> count / divisor);
+      int output = route.outputCount() / divisor;
+      var key = new CostKey(Map.copyOf(counts), output);
+      Cost existing = costs.get(key);
+      // Equal conversion ratios share their resources. The gcd retains real batch granularity:
+      // one 2+2 -> 2 recipe cannot use an odd last ingredient, while 3 -> 6 and 1 -> 2 can combine.
+      costs.put(key, new Cost(existing == null ? divisor : gcd(existing.factor(), divisor), slots));
     }
     long total = 0L;
     for (var cost : costs.entrySet()) {
       long operations = Long.MAX_VALUE;
-      for (var entry : cost.getKey().entrySet()) {
+      for (var entry : cost.getKey().counts().entrySet()) {
         long available = upper(cost.getValue().slots().get(entry.getKey()), depth, known);
         operations = Math.min(operations,
-            available == Long.MAX_VALUE ? available : available / entry.getValue());
+            available == Long.MAX_VALUE ? available : available / (entry.getValue() * cost.getValue().factor()));
       }
-      total = UltsCraftMath.add(total, UltsCraftMath.multiply(operations, cost.getValue().output()));
+      total = UltsCraftMath.add(total, UltsCraftMath.multiply(operations,
+          (long) cost.getKey().output() * cost.getValue().factor()));
     }
     return total;
   }
@@ -915,25 +1432,54 @@ public final class UltsCraftResolver {
   }
 
   /** The slots of a recipe, easiest to fill last. */
-  private List<Ingredient> order(List<Ingredient> ingredients, long operations) {
-    if (ingredients.size() < 2) {
-      return ingredients;
+  private List<UltsCraftPotential.Demand> grouped(List<Ingredient> ingredients, long operations) {
+    var counts = new java.util.LinkedHashMap<List<Item>, Integer>();
+    var slots = new java.util.LinkedHashMap<List<Item>, Ingredient>();
+    for (Ingredient ingredient : ingredients) {
+      var key = slotKey(ingredient);
+      counts.merge(key, 1, Integer::sum); slots.putIfAbsent(key, ingredient);
     }
-    List<Ingredient> ordered = new ArrayList<>(ingredients);
-    Map<Ingredient, Integer> ranks = new HashMap<>(ingredients.size() * 2);
-    ordered.sort(Comparator.comparingInt(
-        ingredient -> ranks.computeIfAbsent(ingredient, slot -> rank(slot, operations))));
-    return ordered;
+    var grouped = new ArrayList<UltsCraftPotential.Demand>();
+    for (var entry : counts.entrySet()) {
+      var ingredient = slots.get(entry.getKey());
+      // Never turn an overflowing material requirement into a feasible saturated request.
+      if (operations > Long.MAX_VALUE / entry.getValue()) {
+        for (int repeat = 0; repeat < entry.getValue(); repeat++) grouped.add(new UltsCraftPotential.Demand(ingredient, operations));
+      } else grouped.add(new UltsCraftPotential.Demand(ingredient, operations * entry.getValue()));
+    }
+    grouped.sort(Comparator.comparingInt(demand -> rank(demand.ingredient(), demand.amount())));
+    return grouped;
   }
 
   private int rank(Ingredient ingredient, long operations) {
-    if (pool.matches(ingredient) >= operations) {
-      // Prefer shortages first. Held slots still backtrack if their accepted materials overlap.
-      return Integer.MAX_VALUE;
+    int sources = sources(ingredient);
+    var candidates = candidates(ingredient);
+    if (!candidates.isEmpty() && candidates.stream().map(ItemStack::getItem).distinct().count() == 1) {
+      int alternative = 0;
+      for (ItemStack candidate : candidates) for (var route : routes(candidate, false)) {
+        if (nonIncreasingConversion(route, ingredient)) continue;
+        int bottleneck = Integer.MAX_VALUE;
+        for (Ingredient input : route.ingredients()) bottleneck = Math.min(bottleneck, sources(input));
+        alternative = Math.max(alternative, bottleneck);
+      }
+      if (alternative > 0) sources = Math.min(sources, alternative);
     }
-    int candidates = candidates(ingredient).size();
-    // Nothing can fill it, so the recipe is impossible: look at it before anything else.
-    return candidates == 0 ? 0 : 1 + Math.min(candidates, 1_000);
+    return sources * 1024 + Math.min(1023, candidates.size());
+  }
+
+  private int sources(Ingredient ingredient) {
+    var inputs = slotInputs.computeIfAbsent(ingredient, slot -> {
+      var items = new HashSet<>(UltsIngredients.accepted(slot));
+      for (ItemStack candidate : candidates(slot)) items.addAll(capacityInputs(candidate));
+      return Set.copyOf(items);
+    });
+    // Count usable source kinds, not only immediate output kinds. Sticks are one output but can
+    // use several wood families; bamboo planks need bamboo. Fill the inflexible slot first.
+    int sources = 0;
+    for (int index = 0; index < pool.size(); index++)
+      if (pool.usableAmountAt(index) > 0 && inputs.contains(pool.templateAt(index).getItem())
+          && !pool.templateAt(index).is(Items.CRAFTING_TABLE) && !pool.templateAt(index).is(Items.STONECUTTER)) sources++;
+    return sources;
   }
 
   /** The routes of one item that may be used right now, best first. */
@@ -944,7 +1490,7 @@ public final class UltsCraftResolver {
     return routeCache.computeIfAbsent(key(template), wanted -> {
       List<UltsCraftRecipe> usable = new ArrayList<>();
       for (UltsCraftRecipe route : source.recipes(template)) {
-        if (station(route)) {
+        if (station(route) && (reachTruncated || runnable(route, reachable))) {
           usable.add(route);
         }
       }

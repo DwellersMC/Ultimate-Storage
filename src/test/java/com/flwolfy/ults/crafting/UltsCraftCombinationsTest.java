@@ -194,6 +194,55 @@ class UltsCraftCombinationsTest {
     }
     return best;
   }
+
+  @Test void resourcePruningAgreesWithIndependentForwardSearchAcrossGeneratedGraphs() {
+    var random = new Random(20261004);
+    Item[] universe = {Items.WHEAT, Items.SUGAR, Items.EGG, Items.PAPER, Items.STICK, Items.TORCH};
+    for (int graph = 0; graph < 96; graph++) {
+      var recipes = new UltsCraftRecipe[]{
+          recipe("paper_a", Items.PAPER, 1 + random.nextInt(3), Ingredient.of(Items.WHEAT)),
+          recipe("paper_b", Items.PAPER, 1 + random.nextInt(2), Ingredient.of(Items.SUGAR)),
+          recipe("sticks_a", Items.STICK, 1 + random.nextInt(3), Ingredient.of(Items.WHEAT), Ingredient.of(Items.EGG)),
+          recipe("sticks_b", Items.STICK, 1 + random.nextInt(2), Ingredient.of(Items.PAPER)),
+          recipe("torch_a", Items.TORCH, 1 + random.nextInt(2), Ingredient.of(Items.PAPER, Items.STICK), Ingredient.of(Items.PAPER)),
+          recipe("torch_b", Items.TORCH, 1 + random.nextInt(2), Ingredient.of(Items.STICK), Ingredient.of(Items.EGG))};
+      try (var catalog = new UltsTestCatalog(recipes)) {
+        int[] start = {random.nextInt(3), random.nextInt(3), random.nextInt(3), 0, 0, 0};
+        int expected = exhaustive(start, universe, recipes);
+        var before = pool();
+        for (int index = 0; index < start.length; index++) before.add(target(universe[index]), start[index]);
+        assertEquals(expected, UltsCraftResolver.capacity(target(Items.TORCH), before, UltsCraftingMode.ALL, true),
+            "generated graph " + graph + " " + Arrays.toString(start) + " "
+                + Arrays.stream(recipes).map(recipe -> recipe.id() + ":" + recipe.outputCount()).toList());
+        if (expected > 0) assertWithdrawal(before, Items.TORCH, expected);
+      }
+    }
+  }
+  @Test void integerBatchResiduesAgreeWithForwardSearchIncludingHeldIntermediates() {
+    var random = new Random(20261005);
+    Item[] universe = {Items.WHEAT, Items.SUGAR, Items.EGG, Items.PAPER, Items.STICK, Items.TORCH};
+    for (int graph = 0; graph < 64; graph++) {
+      var paper = Ingredient.of(Items.PAPER);
+      var stick = Ingredient.of(Items.STICK);
+      var recipes = new UltsCraftRecipe[]{
+          recipe("paper_a", Items.PAPER, 2, Ingredient.of(Items.WHEAT)),
+          recipe("paper_b", Items.PAPER, 2 + 2 * random.nextInt(2), Ingredient.of(Items.SUGAR)),
+          recipe("sticks", Items.STICK, 4, paper, paper),
+          recipe("egg_sticks", Items.STICK, 1, Ingredient.of(Items.EGG), Ingredient.of(Items.EGG)),
+          recipe("torch", Items.TORCH, 1, paper, paper, paper, stick, stick)};
+      try (var catalog = new UltsTestCatalog(recipes)) {
+        int[] start = {random.nextInt(4), random.nextInt(4), random.nextInt(4), random.nextInt(4), random.nextInt(4), 0};
+        int expected = exhaustive(start, universe, recipes);
+        var before = pool();
+        for (int index = 0; index < start.length; index++) before.add(target(universe[index]), start[index]);
+        var resolver = UltsCraftResolver.of(before, UltsCraftingMode.ALL, true);
+        assertEquals(expected, resolver.capacity(target(Items.TORCH)), "integer graph " + graph + " " + Arrays.toString(start));
+        if (expected > 0) assertWithdrawal(before, Items.TORCH, expected);
+        assertNull(resolver.plan(target(Items.TORCH), expected + 1L));
+      }
+    }
+  }
+
   private static void forward(UltsCraftRecipe recipe, int slot, int[] state, Item[] universe,
       Set<String> seen, ArrayDeque<int[]> queue) {
     if (slot == recipe.ingredients().size()) {

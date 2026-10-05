@@ -71,13 +71,6 @@ public final class UltsRuntime {
    */
   private static final long CRAFTABLE_NANOS_PER_TICK = 30_000_000L;
 
-  /**
-   * How many rows one view may leave waiting before a screen settles for the answers it has.
-   *
-   * <p>Redrawing until everything is answered is what keeps a row from being blank for long, but it
-   * has to end even if some row never gets its turn, or a screen would redraw for ever.
-   */
-  private static final int MAX_CRAFTABLE_WAITS = 200;
   /** Component variants can be numerous; retain only recently requested exact crafting answers. */
   private static final int MAX_CRAFTING_ANSWERS = 20_000;
 
@@ -112,6 +105,21 @@ public final class UltsRuntime {
   private record CraftingMemo(Map<PackingKind, Long> inputs, UltsCraftingMode mode,
       long amount, boolean noStation) {}
   private final LinkedHashMap<PackingKind, CraftingMemo> craftingAnswers = new LinkedHashMap<>(64, 0.75f, true);
+  private static final class CraftingWork {
+    final Map<PackingKind, Long> inputs;
+    final UltsCraftingMode mode;
+    final UltsCraftResolver resolver;
+    final UltsCraftPool pool;
+    UltsCraftResolver loose;
+    long queried = Long.MIN_VALUE;
+    long attempted = Long.MIN_VALUE;
+    CraftingWork(Map<PackingKind, Long> inputs, UltsCraftingMode mode, UltsCraftResolver resolver, UltsCraftPool pool) {
+      this.inputs = Map.copyOf(inputs); this.mode = mode; this.resolver = resolver; this.pool = pool;
+    }
+  }
+  private final LinkedHashMap<PackingKind, CraftingWork> craftingWork = new LinkedHashMap<>(64, 0.75f, true);
+  private long craftingTurnTick = Long.MIN_VALUE;
+  private PackingKind craftingTurn;
   private final UltsInputManager inputs;
   private final UltsHighlights highlights = new UltsHighlights();
   /** Stocks on their way out of the storage, a tick's worth at a time. */
@@ -150,8 +158,6 @@ public final class UltsRuntime {
   private boolean craftableDeferred;
   /** Whether the view the answers come from is behind the contents and has not caught up yet. */
   private boolean craftableViewStale;
-  /** How many rows the current view has already left waiting. */
-  private int craftableWaits;
 
   UltsRuntime(MinecraftServer server) {
     this(server, loadState(server), server::getTickCount);
@@ -234,6 +240,9 @@ public final class UltsRuntime {
   /** Catalogues and rules changed, so even unchanged contents need new answers and remote slices. */
   void invalidateCaches() {
     craftingAnswers.clear();
+    craftingWork.clear();
+    craftingTurn = null;
+    craftingTurnTick = Long.MIN_VALUE;
     craftingStability.clear();
     stockStability.clear();
     lastStabilityStock = null;
@@ -245,7 +254,6 @@ public final class UltsRuntime {
     craftableMode = null;
     craftableTick = Long.MIN_VALUE;
     lastStock = null;
-    craftableWaits = 0;
     craftableDeferred = false;
     craftableViewStale = false;
     craftableBudgetTick = Long.MIN_VALUE;
@@ -600,16 +608,52 @@ public final class UltsRuntime {
       return measuredCrafting(key, known.amount(), known.noStation());
     // A row never inherits another row's stale flag. Changed inputs require a current resolver;
     // unchanged inputs retain their exact answer without spending another row's search budget.
-    UltsCraftResolver resolver = view(stock, true, true);
-    if (resolver == null) return new CraftingAmount(0L, false, false);
-    long amount = resolver.capacity(template, budget());
+    CraftingWork work = craftingWork.get(key);
+    if (work == null || work.mode != mode || !work.inputs.equals(signature)) {
+      UltsCraftResolver resolver = view(stock, true, true);
+      if (resolver == null) return new CraftingAmount(0L, false, false);
+      work = new CraftingWork(signature, mode, resolver, craftableViewPool);
+      if (!craftingWork.containsKey(key) && craftingWork.size() >= MAX_CRAFTING_ANSWERS) craftingWork.pollFirstEntry();
+      craftingWork.put(key, work);
+    }
+    // Keep unfinished searches when unrelated stock changes. This immutable resolver can still
+    // answer this kind because all transitive ingredients, returns and stations have the same counts.
+    long tick = ticks.getAsLong();
+    work.queried = tick;
+    // Cache hits and proven unreachable kinds need no turn. Waiting for another kind's search
+    // must never turn an already known zero (for example a named sword) into "calculating".
+    long amount = work.resolver.capacity(template, Long.MIN_VALUE);
+    long withoutStation = UltsCraftResolver.UNKNOWN;
+    if (amount == 0L) {
+      if (work.loose == null) work.loose = work.resolver == craftableView
+          ? looseView() : UltsCraftResolver.of(work.pool, mode, false);
+      withoutStation = work.loose.capacity(template, Long.MIN_VALUE);
+    }
+    if (amount == UltsCraftResolver.UNKNOWN || (amount == 0L && withoutStation == UltsCraftResolver.UNKNOWN)) {
+      if (craftingTurnTick != tick) {
+        craftingTurnTick = tick;
+        craftingTurn = craftingWork.entrySet().stream().filter(entry -> entry.getValue().queried >= tick - 1)
+            .min(java.util.Comparator.comparingLong(entry -> entry.getValue().attempted))
+            .map(Map.Entry::getKey).orElse(null);
+      }
+      long deadline = budget();
+      if ((craftingTurn != null && !craftingTurn.equals(key)) || System.nanoTime() >= deadline) {
+        defer();
+        return new CraftingAmount(0L, true, false);
+      }
+      craftingTurn = null;
+      work.attempted = tick;
+      if (amount == UltsCraftResolver.UNKNOWN) amount = work.resolver.capacity(template, deadline);
+    }
     if (amount == UltsCraftResolver.UNKNOWN) {
       defer();
       return new CraftingAmount(0L, true, false);
     }
     boolean noStation = false;
     if (amount == 0L) {
-      long withoutStation = looseView().capacity(template, budget());
+      if (work.loose == null) work.loose = work.resolver == craftableView
+          ? looseView() : UltsCraftResolver.of(work.pool, mode, false);
+      if (withoutStation == UltsCraftResolver.UNKNOWN) withoutStation = work.loose.capacity(template, budget());
       if (withoutStation == UltsCraftResolver.UNKNOWN) {
         defer();
         return new CraftingAmount(0L, true, false);
@@ -621,6 +665,8 @@ public final class UltsRuntime {
       craftingStability.forget(evicted.getKey());
     }
     craftingAnswers.put(key, new CraftingMemo(Map.copyOf(signature), mode, amount, noStation));
+    craftingWork.remove(key);
+    if (key.equals(craftingTurn)) craftingTurn = null;
     return measuredCrafting(key, amount, noStation);
   }
 
@@ -723,10 +769,9 @@ public final class UltsRuntime {
 
   /** Notes that an answer is still owed, so a screen showing them may redraw on a later tick. */
   private void defer() {
-    // A page asks many rows in one tick. Count ticks, not rows, or a few redraws exhaust all retries.
+    // Time limits defer work; they must never disable the redraw that will finish it.
     if (craftableDeferred) return;
-    craftableWaits++;
-    craftableDeferred = craftableWaits < MAX_CRAFTABLE_WAITS;
+    craftableDeferred = true;
   }
 
   /**
@@ -755,8 +800,8 @@ public final class UltsRuntime {
     }
     long value = view.capacity(template, budget());
     if (value == UltsCraftResolver.UNKNOWN) {
-      // Out of this tick's time: the row keeps no answer yet and the screen asks again next tick,
-      // until it has asked often enough that settling for what it has beats asking again.
+      // Out of this tick's time: the row keeps no answer yet and the screen asks again next tick.
+      // An unfinished answer must never disable the refresh that will eventually replace it.
       defer();
       return 0L;
     }
@@ -819,7 +864,6 @@ public final class UltsRuntime {
       craftableFingerprint = fingerprint;
       craftableMode = mode;
       craftableTick = tick;
-      craftableWaits = 0;
       craftableViewStale = false;
       // A pass that stopped at its budget knows less than it could. Marking it after the reset is what
       // makes the mark stick: screens then keep redrawing, and what the pass left out is not presented as
